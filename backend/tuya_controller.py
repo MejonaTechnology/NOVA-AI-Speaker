@@ -139,16 +139,21 @@ class SmartLightController:
         )
         self.device_id = "d7a2448c70762e9235aca7"  # Bedroom light
 
-        # Color mappings (HSV values)
+        # State tracking
+        self.current_mode = "white"  # "white" or "colour"
+        self.current_brightness = 70  # 0-100 percent
+        self.current_color_hsv = {"h": 240, "s": 1000, "v": 700}  # Default blue
+
+        # Color mappings (HSV values - h and s only, v is set by brightness)
         self.colors = {
-            "red": {"h": 0, "s": 1000, "v": 1000},
-            "orange": {"h": 30, "s": 1000, "v": 1000},
-            "yellow": {"h": 60, "s": 1000, "v": 1000},
-            "green": {"h": 120, "s": 1000, "v": 1000},
-            "cyan": {"h": 180, "s": 1000, "v": 1000},
-            "blue": {"h": 240, "s": 1000, "v": 1000},
-            "purple": {"h": 280, "s": 1000, "v": 1000},
-            "pink": {"h": 320, "s": 1000, "v": 1000},
+            "red": {"h": 0, "s": 1000},
+            "orange": {"h": 30, "s": 1000},
+            "yellow": {"h": 60, "s": 1000},
+            "green": {"h": 120, "s": 1000},
+            "cyan": {"h": 180, "s": 1000},
+            "blue": {"h": 240, "s": 1000},
+            "purple": {"h": 280, "s": 1000},
+            "pink": {"h": 320, "s": 1000},
             "white": None  # Use white mode instead
         }
 
@@ -165,12 +170,25 @@ class SmartLightController:
         ])
 
     def set_brightness(self, percent):
-        """Set brightness (0-100%)"""
+        """Set brightness (0-100%) - works for both white and color modes"""
+        # Store brightness
+        self.current_brightness = max(0, min(100, percent))
+
         # Convert percent to Tuya range (10-1000)
-        value = max(10, min(1000, int(percent * 10)))
-        return self.api.send_commands(self.device_id, [
-            {"code": "bright_value_v2", "value": value}
-        ])
+        value = max(10, min(1000, int(self.current_brightness * 10)))
+
+        if self.current_mode == "colour":
+            # In color mode, brightness is controlled by 'v' in colour_data_v2
+            self.current_color_hsv["v"] = value
+            return self.api.send_commands(self.device_id, [
+                {"code": "work_mode", "value": "colour"},
+                {"code": "colour_data_v2", "value": self.current_color_hsv}
+            ])
+        else:
+            # In white mode, use bright_value_v2
+            return self.api.send_commands(self.device_id, [
+                {"code": "bright_value_v2", "value": value}
+            ])
 
     def set_color(self, color_name):
         """Set color by name (red, blue, green, etc.)"""
@@ -178,22 +196,39 @@ class SmartLightController:
 
         if color_name == "white" or color_name == "warm" or color_name == "cool":
             # Use white mode
+            self.current_mode = "white"
             temp_value = 500  # Default middle
             if color_name == "warm":
                 temp_value = 800  # Warm white
             elif color_name == "cool":
                 temp_value = 200  # Cool white
 
+            # Use current brightness for white mode
+            brightness_value = max(10, min(1000, int(self.current_brightness * 10)))
+
             return self.api.send_commands(self.device_id, [
                 {"code": "work_mode", "value": "white"},
                 {"code": "temp_value_v2", "value": temp_value},
-                {"code": "bright_value_v2", "value": 700}
+                {"code": "bright_value_v2", "value": brightness_value}
             ])
         elif color_name in self.colors:
             # Use color mode
+            self.current_mode = "colour"
+
+            # Get h and s from color map, use current brightness for v
+            color_hs = self.colors[color_name]
+            brightness_value = max(10, min(1000, int(self.current_brightness * 10)))
+
+            # Update current color HSV
+            self.current_color_hsv = {
+                "h": color_hs["h"],
+                "s": color_hs["s"],
+                "v": brightness_value
+            }
+
             return self.api.send_commands(self.device_id, [
                 {"code": "work_mode", "value": "colour"},
-                {"code": "colour_data_v2", "value": self.colors[color_name]}
+                {"code": "colour_data_v2", "value": self.current_color_hsv}
             ])
         else:
             print(f"[TUYA] Unknown color: {color_name}")
