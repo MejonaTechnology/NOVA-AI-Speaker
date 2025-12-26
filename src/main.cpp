@@ -45,8 +45,8 @@ void setupMicrophone() {
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 512,
+        .dma_buf_count = 16,
+        .dma_buf_len = 1024,
         .use_apll = false,
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0
@@ -74,8 +74,8 @@ void setupSpeaker() {
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 4, // Increase DMA buffers for stability
-        .dma_buf_len = 512,
+        .dma_buf_count = 16, // Increase DMA buffers for stability
+        .dma_buf_len = 1024,
         .use_apll = false,
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
@@ -169,7 +169,7 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
     Serial.println("[REC] Recording started...");
     isRecording = true;
     
-    uint8_t* audioBuffer = (uint8_t*)ps_malloc(RECORD_BUFFER_SIZE);
+    uint8_t* audioBuffer = (uint8_t*)malloc(RECORD_BUFFER_SIZE);
     if (!audioBuffer) {
         Serial.println("[REC] Failed to allocate buffer!");
         isRecording = false;
@@ -224,7 +224,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 #if USE_HTTPS
     String url = String("https://") + BACKEND_HOST + VOICE_ENDPOINT;
     WiFiClientSecure client;
-    client.setInsecure();  // Skip cert verification for speed
+    client.setInsecure();
 #else
     String url = String("http://") + BACKEND_HOST + ":" + String(BACKEND_PORT) + VOICE_ENDPOINT;
     WiFiClient client;
@@ -234,38 +234,169 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     HTTPClient http;
     http.begin(client, url);
     http.addHeader("Content-Type", "application/octet-stream");
-    http.setTimeout(30000);
+    http.setTimeout(45000);  // Increased to 45s for backend processing time
     
-    // Feedback: Processing
     setLedColor(0, 0, 255); // Blue (Processing)
     playMelody(2); // Thinking Sound
     
     int httpCode = http.POST(audioData, audioSize);
     
     if (httpCode == HTTP_CODE_OK) {
-        Serial.println("[HTTP] Response received, playing audio...");
-        isPlaying = true;
-        
-        setLedColor(50, 0, 200); // Purple (Speaking)
-        
         WiFiClient* stream = http.getStreamPtr();
-        uint8_t buffer[4096];
-        size_t bytesWritten;
+        size_t psramSize = ESP.getPsramSize();
+        Serial.printf("[SYS] PSRAM Size: %d bytes\n", psramSize);
         
-        while (stream->available() || http.connected()) {
-            size_t available = stream->available();
-            if (available > 0) {
-                int bytesRead = stream->readBytes(buffer, min((size_t)4096, available));
-                
-                if (bytesRead > 0) {
-                    // Volume is handled by backend now
-                    i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
-                }
-            } else {
-                delay(1);
+        // ============================================
+        // MODE A: PSRAM AVAILABLE (Download-to-RAM)
+        // ============================================
+        if (psramSize > 0) {
+            Serial.println("[HTTP] PSRAM Detected. Downloading Full Audio...");
+            
+            // Increase to 6MB (Approx 90 seconds of 16k stereo audio)
+            // N16R8 has 8MB PSRAM, so 6MB is safe.
+            size_t bufSize = 1024 * 1024 * 6; 
+            uint8_t* audioBuf = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+            
+            if (!audioBuf) {
+                Serial.printf("[ERR] PSRAM malloc (6MB) failed! Free PSRAM: %d\n", ESP.getFreePsram());
+                http.end();
+                return;
             }
+
+            size_t totalBytesRead = 0;
+            unsigned long lastDataTime = millis();
+            unsigned long downloadStartTime = millis();
+            bool receivedFirstByte = false;
+
+            Serial.println("[HTTP] Waiting for audio data from backend...");
+
+            // Download Loop - Wait up to 30s for first byte, then 10s between chunks
+            while (http.connected() || stream->available()) {
+                size_t available = stream->available();
+                if (available > 0) {
+                    if (!receivedFirstByte) {
+                        Serial.println("[HTTP] Audio data started arriving...");
+                        receivedFirstByte = true;
+                    }
+
+                    if (totalBytesRead + available > bufSize) {
+                        Serial.println("[WARN] Buffer full, stopping download");
+                        break;
+                    }
+
+                    int r = stream->readBytes(audioBuf + totalBytesRead, available);
+                    totalBytesRead += r;
+                    lastDataTime = millis();
+
+                    // Progress indicator every 50KB
+                    if (totalBytesRead % 51200 == 0) {
+                        Serial.printf("[HTTP] Downloaded %d KB...\n", totalBytesRead / 1024);
+                    }
+                } else {
+                    // No data available right now
+                    if (!receivedFirstByte) {
+                        // Still waiting for backend to send first byte (backend processing time)
+                        if (millis() - downloadStartTime > 30000) {
+                            Serial.println("[ERR] Timeout waiting for backend response (30s)");
+                            break;
+                        }
+                    } else {
+                        // Already receiving data, check for completion timeout
+                        if (millis() - lastDataTime > 10000) {
+                            Serial.println("[HTTP] No more data for 10s, download complete");
+                            break;
+                        }
+                    }
+                    delay(10);
+                }
+            }
+            
+            Serial.printf("[HTTP] Downloaded %d bytes. Playing from PSRAM...\n", totalBytesRead);
+            isPlaying = true;
+            setLedColor(50, 0, 200); // Purple (Speaking)
+            
+            size_t bytesWritten;
+            size_t offset = 0;
+            size_t chunkSize = 4096;
+            
+            while (offset < totalBytesRead) {
+                size_t writeSize = min(chunkSize, totalBytesRead - offset);
+                i2s_write(SPK_I2S_NUM, audioBuf + offset, writeSize, &bytesWritten, portMAX_DELAY);
+                offset += writeSize;
+                // Pet watchdog?
+                delay(1); 
+            }
+            
+            free(audioBuf);
+        } 
+        // ============================================
+        // MODE B: SRAM ONLY (Streaming)
+        // ============================================
+        else {
+            Serial.println("[HTTP] No PSRAM. Using Stream Mode (SRAM)...");
+            isPlaying = true;
+            setLedColor(50, 0, 200); // Purple (Speaking)
+            
+            const size_t bufferSize = 16384; 
+            uint8_t* buffer = (uint8_t*)malloc(bufferSize);
+            
+            if (!buffer) {
+                Serial.println("[ERR] SRAM malloc failed!");
+                http.end();
+                return;
+            }
+
+            size_t bytesWritten;
+            unsigned long lastDataTime = millis();
+            unsigned long streamStartTime = millis();
+            bool receivedFirstByte = false;
+            size_t totalStreamed = 0;
+
+            Serial.println("[HTTP] Waiting for audio stream from backend...");
+
+            // Streaming Loop - Wait up to 30s for first byte, then 10s between chunks
+            while (http.connected() || stream->available()) {
+                size_t available = stream->available();
+                if (available > 0) {
+                    if (!receivedFirstByte) {
+                        Serial.println("[HTTP] Audio stream started...");
+                        receivedFirstByte = true;
+                    }
+
+                    lastDataTime = millis();
+                    int bytesRead = stream->readBytes(buffer, min(bufferSize, available));
+                    if (bytesRead > 0) {
+                        i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
+                        totalStreamed += bytesRead;
+
+                        // Progress indicator every 50KB
+                        if (totalStreamed % 51200 < bufferSize) {
+                            Serial.printf("[STREAM] Played %d KB...\n", totalStreamed / 1024);
+                        }
+                    }
+                } else {
+                    // No data available right now
+                    if (!receivedFirstByte) {
+                        // Still waiting for backend to send first byte
+                        if (millis() - streamStartTime > 30000) {
+                            Serial.println("[ERR] Timeout waiting for backend stream (30s)");
+                            break;
+                        }
+                    } else {
+                        // Already streaming, check for completion timeout
+                        if (millis() - lastDataTime > 10000) {
+                            Serial.println("[STREAM] No more data for 10s, stream complete");
+                            break;
+                        }
+                    }
+                    delay(10);
+                }
+            }
+
+            Serial.printf("[STREAM] Total streamed: %d bytes\n", totalStreamed);
+            free(buffer);
         }
-        
+
         i2s_zero_dma_buffer(SPK_I2S_NUM);
         isPlaying = false;
         setLedColor(0,0,0); // Off

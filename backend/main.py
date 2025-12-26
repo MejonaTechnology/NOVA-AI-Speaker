@@ -38,9 +38,13 @@ async def process_voice(request: Request):
     """
     Receive raw PCM audio, process with AI, return WAV audio response.
     """
-    # Read raw PCM data from request
-    pcm_data = await request.body()
-    print(f"[RECV] Received {len(pcm_data)} bytes of audio")
+    try:
+        # Read raw PCM data from request
+        pcm_data = await request.body()
+        print(f"[RECV] Received {len(pcm_data)} bytes of audio")
+    except Exception as e:
+        print(f"[ERR] Failed to read request body: {e}")
+        return Response(content=b"Error reading audio", status_code=400)
     
     # Convert PCM to WAV for Whisper
     wav_buffer = io.BytesIO()
@@ -53,31 +57,39 @@ async def process_voice(request: Request):
     wav_buffer.name = "audio.wav"
     
     # 1. Speech-to-Text with Whisper
-    print("[STT] Transcribing with Whisper...")
-    transcription = client.audio.transcriptions.create(
-        model="whisper-large-v3-turbo",
-        file=wav_buffer,
-        language="en"
-    )
-    user_text = transcription.text.strip()
-    print(f"[STT] User said: {user_text}")
-    
-    if not user_text:
-        user_text = "Hello"
+    try:
+        print("[STT] Transcribing with Whisper...")
+        transcription = client.audio.transcriptions.create(
+            model="whisper-large-v3-turbo",
+            file=wav_buffer,
+            language="en"
+        )
+        user_text = transcription.text.strip()
+        print(f"[STT] User said: {user_text}")
+
+        if not user_text:
+            user_text = "Hello"
+    except Exception as e:
+        print(f"[ERR] Whisper STT failed: {e}")
+        user_text = "Hello"  # Fallback to greeting
     
     # 2. Generate AI response with LLM
-    print("[LLM] Generating response...")
-    chat_response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text}
-        ],
-        max_tokens=150,
-        temperature=0.7
-    )
-    ai_text = chat_response.choices[0].message.content.strip()
-    print(f"[LLM] AI response: {ai_text}")
+    try:
+        print("[LLM] Generating response...")
+        chat_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text}
+            ],
+            max_tokens=150,
+            temperature=0.7
+        )
+        ai_text = chat_response.choices[0].message.content.strip()
+        print(f"[LLM] AI response: {ai_text}")
+    except Exception as e:
+        print(f"[ERR] LLM generation failed: {e}")
+        ai_text = "Sorry, I'm having trouble thinking right now. Please try again."
     
     # 3. Text-to-Speech with Orpheus (with gTTS fallback)
     print("[TTS] Generating speech with Orpheus...")
@@ -117,43 +129,63 @@ async def process_voice(request: Request):
         wav_bytes = wav_buffer.read()
     
     # Parse WAV and extract raw PCM
-    wav_buffer = io.BytesIO(wav_bytes)
-    with wave.open(wav_buffer, 'rb') as wav_file:
-        orig_rate = wav_file.getframerate()
-        orig_channels = wav_file.getnchannels()
-        orig_width = wav_file.getsampwidth()
-        pcm_data = wav_file.readframes(wav_file.getnframes())
-    
-    # Convert to numpy for resampling if needed
-    if orig_width == 2:
-        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-    else:
-        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-    
-    # Convert stereo to mono first (for resampling)
-    if orig_channels == 2:
-        audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
-    
-    # Resample to 16kHz to reduce data transfer for cloud deployment
-    target_rate = 16000
-    if orig_rate != target_rate:
-        num_samples = int(len(audio_array) * target_rate / orig_rate)
-        indices = np.linspace(0, len(audio_array) - 1, num_samples)
-        audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.int16)
-    
-    # Convert mono to stereo (ESP32 MAX98357 needs stereo)
-    stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
-    stereo_array[0::2] = audio_array  # Left channel
-    stereo_array[1::2] = audio_array  # Right channel
-    
-    pcm_bytes = stereo_array.tobytes()
-    print(f"[TTS] Generated {len(pcm_bytes)} bytes of raw PCM (24kHz, 16-bit, stereo)")
-    
-    # Return raw PCM audio
-    return Response(
-        content=pcm_bytes,
-        media_type="application/octet-stream"
-    )
+    try:
+        wav_buffer = io.BytesIO(wav_bytes)
+        with wave.open(wav_buffer, 'rb') as wav_file:
+            orig_rate = wav_file.getframerate()
+            orig_channels = wav_file.getnchannels()
+            orig_width = wav_file.getsampwidth()
+            pcm_data = wav_file.readframes(wav_file.getnframes())
+
+        print(f"[AUDIO] Original format: {orig_rate}Hz, {orig_channels}ch, {orig_width*8}bit")
+
+        # Convert to numpy for resampling if needed
+        if orig_width == 2:
+            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+        else:
+            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+        # Convert stereo to mono first (for resampling)
+        if orig_channels == 2:
+            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
+
+        # Resample to 16kHz to reduce data transfer for cloud deployment
+        target_rate = 16000
+        if orig_rate != target_rate:
+            num_samples = int(len(audio_array) * target_rate / orig_rate)
+            indices = np.linspace(0, len(audio_array) - 1, num_samples)
+            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.int16)
+            print(f"[AUDIO] Resampled from {orig_rate}Hz to {target_rate}Hz")
+
+        # Apply volume scaling to avoid clipping/brownout (50%)
+        audio_array = (audio_array * 0.5).astype(np.int16)
+
+        # Convert mono to stereo (ESP32 MAX98357 needs stereo)
+        stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
+        stereo_array[0::2] = audio_array  # Left channel
+        stereo_array[1::2] = audio_array  # Right channel
+
+        pcm_bytes = stereo_array.tobytes()
+        print(f"[TTS] Generated {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
+        print(f"[TTS] Audio duration: {len(audio_array) / target_rate:.2f} seconds")
+        print(f"[SEND] Sending response to ESP32...")
+
+        # Return raw PCM audio
+        return Response(
+            content=pcm_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Audio-Sample-Rate": "16000",
+                "X-Audio-Channels": "2",
+                "X-Audio-Bits": "16",
+                "Content-Length": str(len(pcm_bytes))
+            }
+        )
+    except Exception as e:
+        print(f"[ERR] Audio processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response(content=b"Audio processing error", status_code=500)
 
 
 @app.get("/")
