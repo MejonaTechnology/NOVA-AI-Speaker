@@ -31,6 +31,37 @@ static bool micReady = false;
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
+// ============== URL Decode Function ==============
+String urlDecode(String input) {
+    String decoded = "";
+    char c;
+    char code0;
+    char code1;
+    for (unsigned int i = 0; i < input.length(); i++) {
+        c = input.charAt(i);
+        if (c == '+') {
+            decoded += ' ';
+        } else if (c == '%') {
+            if (i + 2 < input.length()) {
+                code0 = input.charAt(++i);
+                code1 = input.charAt(++i);
+                c = (hexToDec(code0) << 4) | hexToDec(code1);
+                decoded += c;
+            }
+        } else {
+            decoded += c;
+        }
+    }
+    return decoded;
+}
+
+int hexToDec(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
 void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
     pixels.setPixelColor(0, pixels.Color(r, g, b));
     pixels.show();
@@ -245,11 +276,12 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         WiFiClient* stream = http.getStreamPtr();
         int contentLength = http.getSize();
 
-        // Get AI response text from custom header
+        // Get AI response text from custom header (URL-encoded)
         String aiResponse = http.header("X-AI-Response");
         if (aiResponse.length() > 0) {
+            String decodedResponse = urlDecode(aiResponse);
             Serial.println("\n========== AI RESPONSE ==========");
-            Serial.println(aiResponse);
+            Serial.println(decodedResponse);
             Serial.println("=================================\n");
         }
 
