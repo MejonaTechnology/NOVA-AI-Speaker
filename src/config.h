@@ -26,12 +26,12 @@
 // ============== Audio Settings ==============
 #define SAMPLE_RATE         16000
 #define BITS_PER_SAMPLE     16
-#define RECORD_SECONDS      10  // Maximum recording duration
+#define RECORD_SECONDS      30  // Maximum recording duration (30 seconds)
 #define I2S_BUFFER_SIZE     1024
 
 // ============== Silence Detection ==============
-#define SILENCE_THRESHOLD       500    // Audio level threshold for silence detection
-#define SILENCE_DURATION_MS     1500   // 1.5 seconds of silence to stop recording
+#define SILENCE_THRESHOLD       300    // Audio level threshold (lower = more sensitive)
+#define SILENCE_DURATION_MS     3000   // 3 seconds of silence to stop recording
 #define MIN_RECORD_DURATION_MS  1000   // Minimum 1 second recording
 
 // Calculated values
