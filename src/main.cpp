@@ -274,7 +274,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 
             // Streaming Loop - Play audio as it arrives
             unsigned long noDataCount = 0;
-            const unsigned long MAX_NO_DATA_CHECKS = 500; // 5 seconds of checking (500 * 10ms)
+            unsigned long lastProgressPrint = 0;
 
             while (true) {
                 size_t available = stream->available();
@@ -292,17 +292,21 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         totalStreamed += bytesRead;
                         noDataCount = 0; // Reset counter when data arrives
 
-                        if (useContentLength) {
-                            Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
-                                totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
-
-                            // Check if we got all expected data
-                            if (totalStreamed >= contentLength) {
-                                Serial.println("[STREAM] All expected data played!");
-                                break;
+                        // Print progress every 2 seconds or when significant progress made
+                        if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < bufferSize)) {
+                            if (useContentLength) {
+                                Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
+                                    totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
+                            } else {
+                                Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
                             }
-                        } else {
-                            Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
+                            lastProgressPrint = millis();
+                        }
+
+                        // PRIORITY: Check if we got all expected data based on Content-Length
+                        if (useContentLength && totalStreamed >= contentLength) {
+                            Serial.printf("[STREAM] ✓ All expected data played! (%d bytes)\n", totalStreamed);
+                            break;
                         }
                     }
                 } else {
@@ -314,26 +318,50 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                             break;
                         }
                     } else {
-                        // Already streaming - check if truly complete
+                        // Already streaming - be VERY patient if we haven't received all data yet
                         noDataCount++;
 
-                        if (noDataCount >= MAX_NO_DATA_CHECKS) {
-                            Serial.printf("[STREAM] No more data after %lu checks\n", noDataCount);
+                        // If we know how much to expect, wait much longer
+                        unsigned long maxWaitChecks;
+                        if (useContentLength && totalStreamed < contentLength) {
+                            // Still expecting more data - wait up to 15 seconds
+                            maxWaitChecks = 1500; // 15 seconds
+
+                            // Log every 5 seconds of waiting
+                            if (noDataCount % 500 == 0) {
+                                Serial.printf("[STREAM] Waiting for more data... (%d / %d bytes received, %.1f%% complete)\n",
+                                    totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
+                            }
+                        } else {
+                            // Either no Content-Length, or we got all expected data
+                            maxWaitChecks = 500; // 5 seconds
+                        }
+
+                        if (noDataCount >= maxWaitChecks) {
+                            Serial.printf("[STREAM] No more data after %lu checks (%.1f seconds)\n",
+                                noDataCount, noDataCount * 0.01);
+
                             if (useContentLength && totalStreamed < contentLength) {
-                                Serial.printf("[WARN] Expected %d bytes but played %d bytes!\n",
-                                    contentLength, totalStreamed);
+                                Serial.printf("[ERROR] INCOMPLETE STREAM! Expected %d bytes but only got %d bytes (%.1f%%)\n",
+                                    contentLength, totalStreamed, (float)totalStreamed * 100.0 / contentLength);
+                            } else {
+                                Serial.println("[STREAM] Stream appears complete");
                             }
                             break;
                         }
 
-                        // Also check if connection closed AND no data available
+                        // Secondary check: connection closed
                         if (!http.connected() && !stream->available()) {
-                            Serial.println("[STREAM] Connection closed");
-                            if (useContentLength && totalStreamed < contentLength) {
-                                Serial.printf("[WARN] Connection closed early! Expected %d, played %d bytes\n",
-                                    contentLength, totalStreamed);
+                            // Wait a bit more even if connection closed, in case data is still in buffer
+                            if (noDataCount > 100) { // Wait at least 1 second after connection closes
+                                Serial.println("[STREAM] Connection closed and no data for 1+ second");
+
+                                if (useContentLength && totalStreamed < contentLength) {
+                                    Serial.printf("[ERROR] Connection closed early! Expected %d, played %d bytes (%.1f%%)\n",
+                                        contentLength, totalStreamed, (float)totalStreamed * 100.0 / contentLength);
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                     delay(10);
