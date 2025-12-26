@@ -6,8 +6,9 @@
 #define WIFI_PASSWORD "96089608"
 
 // ============== Backend Server ==============
-#define BACKEND_HOST "192.168.31.212"  // Your PC's IP address
-#define BACKEND_PORT 8000
+#define BACKEND_HOST "nova.mejona.com"  // OCI Domain
+#define BACKEND_PORT 80  // HTTP (Nginx Proxy > Python 8000)
+#define USE_HTTPS false
 #define VOICE_ENDPOINT "/voice"
 
 // ============== INMP441 Microphone (I2S Input) ==============

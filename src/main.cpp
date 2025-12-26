@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
 #include "config.h"
@@ -64,16 +65,16 @@ void setupMicrophone() {
     Serial.println("[MIC] Microphone initialized (16kHz)");
 }
 
-// ============== I2S Speaker Setup (24kHz) ==============
+// ============== I2S Speaker Setup (16kHz) ==============
 void setupSpeaker() {
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-        .sample_rate = 24000,
+        .sample_rate = 16000,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 2,
+        .dma_buf_count = 4, // Increase DMA buffers for stability
         .dma_buf_len = 512,
         .use_apll = false,
         .tx_desc_auto_clear = true,
@@ -89,12 +90,12 @@ void setupSpeaker() {
 
     ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_NUM, &i2s_config, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_NUM, &pin_config));
-    Serial.println("[SPK] Speaker initialized (24kHz)");
+    Serial.println("[SPK] Speaker initialized (16kHz)");
 }
 
 // ============== Play Beep Sound ==============
 void playBeep(int frequency, int durationMs) {
-    const int sampleRate = 24000;
+    const int sampleRate = 16000;
     const int numSamples = (sampleRate * durationMs) / 1000;
     const float amplitude = 30000.0;
     
@@ -220,11 +221,18 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         return;
     }
     
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + VOICE_ENDPOINT;
+#if USE_HTTPS
+    String url = String("https://") + BACKEND_HOST + VOICE_ENDPOINT;
+    WiFiClientSecure client;
+    client.setInsecure();  // Skip cert verification for speed
+#else
+    String url = String("http://") + BACKEND_HOST + ":" + String(BACKEND_PORT) + VOICE_ENDPOINT;
+    WiFiClient client;
+#endif
     Serial.printf("[HTTP] Sending to %s\n", url.c_str());
     
     HTTPClient http;
-    http.begin(url);
+    http.begin(client, url);
     http.addHeader("Content-Type", "application/octet-stream");
     http.setTimeout(30000);
     
@@ -241,22 +249,16 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         setLedColor(50, 0, 200); // Purple (Speaking)
         
         WiFiClient* stream = http.getStreamPtr();
-        uint8_t buffer[1024];
+        uint8_t buffer[4096];
         size_t bytesWritten;
         
         while (stream->available() || http.connected()) {
-            int available = stream->available();
+            size_t available = stream->available();
             if (available > 0) {
-                int toRead = min(available, 1024);
-                int bytesRead = stream->readBytes(buffer, toRead);
+                int bytesRead = stream->readBytes(buffer, min((size_t)4096, available));
                 
                 if (bytesRead > 0) {
-                    // Apply Volume Reduction (0.8x)
-                    int16_t* samples = (int16_t*)buffer;
-                    for (int i = 0; i < bytesRead / 2; i++) {
-                        samples[i] = (int16_t)(samples[i] * 0.8f); 
-                    }
-
+                    // Volume is handled by backend now
                     i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
                 }
             } else {

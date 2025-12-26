@@ -134,8 +134,8 @@ async def process_voice(request: Request):
     if orig_channels == 2:
         audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
     
-    # Resample to 24kHz to match ESP32 speaker config
-    target_rate = 24000
+    # Resample to 16kHz to reduce data transfer for cloud deployment
+    target_rate = 16000
     if orig_rate != target_rate:
         num_samples = int(len(audio_array) * target_rate / orig_rate)
         indices = np.linspace(0, len(audio_array) - 1, num_samples)
