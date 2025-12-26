@@ -243,138 +243,22 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     
     if (httpCode == HTTP_CODE_OK) {
         WiFiClient* stream = http.getStreamPtr();
-        size_t psramSize = ESP.getPsramSize();
         int contentLength = http.getSize();
-        Serial.printf("[SYS] PSRAM Size: %d bytes\n", psramSize);
         Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
-        
+
         // ============================================
-        // MODE A: PSRAM AVAILABLE (Download-to-RAM)
+        // STREAMING MODE (Play as data arrives)
         // ============================================
-        if (psramSize > 0) {
-            Serial.println("[HTTP] PSRAM Detected. Downloading Full Audio...");
-            
-            // Increase to 6MB (Approx 90 seconds of 16k stereo audio)
-            // N16R8 has 8MB PSRAM, so 6MB is safe.
-            size_t bufSize = 1024 * 1024 * 6; 
-            uint8_t* audioBuf = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
-            
-            if (!audioBuf) {
-                Serial.printf("[ERR] PSRAM malloc (6MB) failed! Free PSRAM: %d\n", ESP.getFreePsram());
-                http.end();
-                return;
-            }
-
-            size_t totalBytesRead = 0;
-            unsigned long lastDataTime = millis();
-            unsigned long downloadStartTime = millis();
-            bool receivedFirstByte = false;
-
-            Serial.println("[HTTP] Waiting for audio data from backend...");
-
-            // Download Loop - Use Content-Length if available, otherwise use timeout logic
-            unsigned long noDataCount = 0;
-            const unsigned long MAX_NO_DATA_CHECKS = 500; // 5 seconds of checking (500 * 10ms)
-            bool useContentLength = (contentLength > 0);
-
-            while (true) {
-                size_t available = stream->available();
-
-                if (available > 0) {
-                    if (!receivedFirstByte) {
-                        Serial.println("[HTTP] Audio data started arriving...");
-                        receivedFirstByte = true;
-                    }
-
-                    if (totalBytesRead + available > bufSize) {
-                        Serial.println("[WARN] Buffer full, stopping download");
-                        break;
-                    }
-
-                    int r = stream->readBytes(audioBuf + totalBytesRead, available);
-                    totalBytesRead += r;
-                    lastDataTime = millis();
-                    noDataCount = 0; // Reset counter when data arrives
-
-                    if (useContentLength) {
-                        Serial.printf("[HTTP] Downloaded: %d / %d bytes (%.1f%%)\n",
-                            totalBytesRead, contentLength, (float)totalBytesRead * 100.0 / contentLength);
-
-                        // Check if we got all expected data
-                        if (totalBytesRead >= contentLength) {
-                            Serial.println("[HTTP] All expected data received!");
-                            break;
-                        }
-                    } else {
-                        Serial.printf("[HTTP] Downloaded: %d bytes (%.1f KB)\n", totalBytesRead, totalBytesRead / 1024.0);
-                    }
-                } else {
-                    // No data available right now
-                    if (!receivedFirstByte) {
-                        // Still waiting for backend to send first byte (backend processing time)
-                        if (millis() - downloadStartTime > 30000) {
-                            Serial.println("[ERR] Timeout waiting for backend response (30s)");
-                            break;
-                        }
-                    } else {
-                        // Already receiving data - check if truly complete
-                        noDataCount++;
-
-                        if (noDataCount >= MAX_NO_DATA_CHECKS) {
-                            Serial.printf("[HTTP] No more data after %lu checks (%d bytes received)\n",
-                                noDataCount, totalBytesRead);
-                            if (useContentLength && totalBytesRead < contentLength) {
-                                Serial.printf("[WARN] Expected %d bytes but got %d bytes!\n",
-                                    contentLength, totalBytesRead);
-                            }
-                            break;
-                        }
-
-                        // Also check if connection closed AND no data available
-                        if (!http.connected() && !stream->available()) {
-                            Serial.println("[HTTP] Connection closed and no data available");
-                            if (useContentLength && totalBytesRead < contentLength) {
-                                Serial.printf("[WARN] Connection closed early! Expected %d, got %d bytes\n",
-                                    contentLength, totalBytesRead);
-                            }
-                            break;
-                        }
-                    }
-                    delay(10);
-                }
-            }
-            
-            Serial.printf("[HTTP] Downloaded %d bytes. Playing from PSRAM...\n", totalBytesRead);
+        {
+            Serial.println("[STREAM] Starting real-time playback...");
             isPlaying = true;
             setLedColor(50, 0, 200); // Purple (Speaking)
-            
-            size_t bytesWritten;
-            size_t offset = 0;
-            size_t chunkSize = 4096;
-            
-            while (offset < totalBytesRead) {
-                size_t writeSize = min(chunkSize, totalBytesRead - offset);
-                i2s_write(SPK_I2S_NUM, audioBuf + offset, writeSize, &bytesWritten, portMAX_DELAY);
-                offset += writeSize;
-                // Pet watchdog?
-                delay(1); 
-            }
-            
-            free(audioBuf);
-        } 
-        // ============================================
-        // MODE B: SRAM ONLY (Streaming)
-        // ============================================
-        else {
-            Serial.println("[HTTP] No PSRAM. Using Stream Mode (SRAM)...");
-            isPlaying = true;
-            setLedColor(50, 0, 200); // Purple (Speaking)
-            
-            const size_t bufferSize = 16384; 
+
+            const size_t bufferSize = 16384;
             uint8_t* buffer = (uint8_t*)malloc(bufferSize);
-            
+
             if (!buffer) {
-                Serial.println("[ERR] SRAM malloc failed!");
+                Serial.println("[ERR] Buffer malloc failed!");
                 http.end();
                 return;
             }
@@ -384,10 +268,11 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
             unsigned long streamStartTime = millis();
             bool receivedFirstByte = false;
             size_t totalStreamed = 0;
+            bool useContentLength = (contentLength > 0);
 
-            Serial.println("[HTTP] Waiting for audio stream from backend...");
+            Serial.println("[STREAM] Waiting for audio from backend...");
 
-            // Streaming Loop - Wait up to 30s for first byte, then check carefully for completion
+            // Streaming Loop - Play audio as it arrives
             unsigned long noDataCount = 0;
             const unsigned long MAX_NO_DATA_CHECKS = 500; // 5 seconds of checking (500 * 10ms)
 
@@ -396,7 +281,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 
                 if (available > 0) {
                     if (!receivedFirstByte) {
-                        Serial.println("[HTTP] Audio stream started...");
+                        Serial.println("[STREAM] Audio started, playing immediately...");
                         receivedFirstByte = true;
                     }
 
@@ -407,7 +292,18 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         totalStreamed += bytesRead;
                         noDataCount = 0; // Reset counter when data arrives
 
-                        Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
+                        if (useContentLength) {
+                            Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
+                                totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
+
+                            // Check if we got all expected data
+                            if (totalStreamed >= contentLength) {
+                                Serial.println("[STREAM] All expected data played!");
+                                break;
+                            }
+                        } else {
+                            Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
+                        }
                     }
                 } else {
                     // No data available right now
@@ -422,13 +318,21 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         noDataCount++;
 
                         if (noDataCount >= MAX_NO_DATA_CHECKS) {
-                            Serial.printf("[STREAM] No more data after %lu checks, assuming complete\n", noDataCount);
+                            Serial.printf("[STREAM] No more data after %lu checks\n", noDataCount);
+                            if (useContentLength && totalStreamed < contentLength) {
+                                Serial.printf("[WARN] Expected %d bytes but played %d bytes!\n",
+                                    contentLength, totalStreamed);
+                            }
                             break;
                         }
 
                         // Also check if connection closed AND no data available
                         if (!http.connected() && !stream->available()) {
-                            Serial.println("[STREAM] Connection closed and no data available");
+                            Serial.println("[STREAM] Connection closed");
+                            if (useContentLength && totalStreamed < contentLength) {
+                                Serial.printf("[WARN] Connection closed early! Expected %d, played %d bytes\n",
+                                    contentLength, totalStreamed);
+                            }
                             break;
                         }
                     }
@@ -436,7 +340,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                 }
             }
 
-            Serial.printf("[STREAM] Total streamed: %d bytes\n", totalStreamed);
+            Serial.printf("[STREAM] Total played: %d bytes\n", totalStreamed);
             free(buffer);
         }
 
