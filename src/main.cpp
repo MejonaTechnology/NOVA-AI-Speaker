@@ -31,7 +31,14 @@ static bool micReady = false;
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-// ============== URL Decode Function ==============
+// ============== Helper Functions ==============
+int hexToDec(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
 String urlDecode(String input) {
     String decoded = "";
     char c;
@@ -53,13 +60,6 @@ String urlDecode(String input) {
         }
     }
     return decoded;
-}
-
-int hexToDec(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return 0;
 }
 
 void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
@@ -197,9 +197,9 @@ static int microphoneCallback(short *buffer, uint32_t n) {
 
 // ============== Record Audio for Backend ==============
 uint8_t* recordAudio(size_t* bytesRecorded) {
-    Serial.println("[REC] Recording started...");
+    Serial.println("[REC] Recording started (max 10s, auto-stop on silence)...");
     isRecording = true;
-    
+
     uint8_t* audioBuffer = (uint8_t*)malloc(RECORD_BUFFER_SIZE);
     if (!audioBuffer) {
         Serial.println("[REC] Failed to allocate buffer!");
@@ -207,23 +207,47 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
         *bytesRecorded = 0;
         return nullptr;
     }
-    
+
     size_t totalBytes = 0;
     size_t bytesRead = 0;
     uint8_t tempBuffer[1024];
-    
+
     unsigned long startTime = millis();
     unsigned long recordDuration = RECORD_SECONDS * 1000;
-    
+    unsigned long lastSoundTime = millis();  // Track last time sound was detected
+
     i2s_zero_dma_buffer(MIC_I2S_NUM);
     delay(100);
-    
+
     while ((millis() - startTime) < recordDuration && totalBytes < RECORD_BUFFER_SIZE) {
         i2s_read(MIC_I2S_NUM, tempBuffer, 1024, &bytesRead, portMAX_DELAY);
-        
+
         if (bytesRead > 0) {
-            // Apply Gain to recording
+            // Calculate audio level for silence detection
             int16_t* samples = (int16_t*)tempBuffer;
+            int32_t maxLevel = 0;
+
+            for (int i = 0; i < bytesRead / 2; i++) {
+                int32_t level = abs(samples[i]);
+                if (level > maxLevel) {
+                    maxLevel = level;
+                }
+            }
+
+            // Check if sound detected above threshold
+            if (maxLevel > SILENCE_THRESHOLD) {
+                lastSoundTime = millis();
+            }
+
+            // Check for silence timeout (only after minimum recording time)
+            if ((millis() - startTime) > MIN_RECORD_DURATION_MS &&
+                (millis() - lastSoundTime) > SILENCE_DURATION_MS) {
+                Serial.printf("[REC] Silence detected (max level: %d), stopping early at %.1fs\n",
+                    maxLevel, (millis() - startTime) / 1000.0);
+                break;
+            }
+
+            // Apply Gain to recording
             for (int i = 0; i < bytesRead / 2; i++) {
                 int32_t sample = samples[i] * 3; // 3x Gain
                 if (sample > 32767) sample = 32767;
@@ -237,11 +261,12 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
             }
         }
     }
-    
+
     *bytesRecorded = totalBytes;
     isRecording = false;
-    Serial.printf("[REC] Recorded %d bytes\n", totalBytes);
-    
+    float recordedSeconds = (millis() - startTime) / 1000.0;
+    Serial.printf("[REC] Recorded %d bytes in %.1f seconds\n", totalBytes, recordedSeconds);
+
     return audioBuffer;
 }
 
@@ -276,11 +301,20 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         WiFiClient* stream = http.getStreamPtr();
         int contentLength = http.getSize();
 
+        // Get STT transcription from custom header (URL-encoded)
+        String transcription = http.header("X-Transcription");
+        if (transcription.length() > 0) {
+            String decodedTranscription = urlDecode(transcription);
+            Serial.println("\n========== YOU SAID ==========");
+            Serial.println(decodedTranscription);
+            Serial.println("==============================\n");
+        }
+
         // Get AI response text from custom header (URL-encoded)
         String aiResponse = http.header("X-AI-Response");
         if (aiResponse.length() > 0) {
             String decodedResponse = urlDecode(aiResponse);
-            Serial.println("\n========== AI RESPONSE ==========");
+            Serial.println("========== AI RESPONSE ==========");
             Serial.println(decodedResponse);
             Serial.println("=================================\n");
         }
