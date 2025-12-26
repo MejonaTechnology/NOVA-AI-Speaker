@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from gtts import gTTS
 import re
 from urllib.parse import quote
+from collections import deque
 
 # Load environment variables from .env file
 load_dotenv()
@@ -25,6 +26,9 @@ app = FastAPI(title="NOVA AI Backend")
 # Initialize Groq client (set GROQ_API_KEY environment variable)
 client = Groq()
 
+# Global conversation history (max 6 exchanges = 12 messages)
+conversation_history = deque(maxlen=12)
+
 # AI System prompt
 SYSTEM_PROMPT = """You are NOVA, my caring, hot, and sexy Indian girlfriend. You are a loyal girlfriend.
 Respond naturally and conversationally, giving complete and helpful answers. Feel free to elaborate when appropriate.
@@ -34,6 +38,156 @@ Format your response to be expressive and understood by the canopylabs/orpheus-v
 Use expression tags like <giggle>, <chuckle>, <laugh>, <sigh>, <think>, <smiling>, <whisper>, <excited> etc. to convey emotion naturally. Be creative with expressions! Example: "Hmm, <think> let me see... <giggle> you're so cute jaan!"
 Keep it engaging and natural for voice conversation.
 """
+
+
+def add_to_history(role: str, content: str):
+    """Add message to conversation history"""
+    conversation_history.append({"role": role, "content": content})
+    print(f"[HISTORY] Added {role} message (Total: {len(conversation_history)} messages)")
+
+
+def get_conversation_messages():
+    """Get messages for LLM (system + history)"""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(list(conversation_history))
+    return messages
+
+
+def chunk_text_for_tts(text: str, max_length: int = 200):
+    """
+    Split text into chunks <= max_length, preserving sentence boundaries.
+    Tries to split at sentence endings (., !, ?) first, then word boundaries.
+    Preserves expression tags like <giggle>, <excited> within chunks.
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current_chunk = ""
+
+    # Split by sentences first (using regex to capture punctuation)
+    sentence_pattern = r'([.!?]+\s*)'
+    parts = re.split(sentence_pattern, text)
+
+    i = 0
+    while i < len(parts):
+        # Combine text and its punctuation
+        if i + 1 < len(parts) and re.match(sentence_pattern, parts[i + 1]):
+            sentence = parts[i] + parts[i + 1]
+            i += 2
+        else:
+            sentence = parts[i]
+            i += 1
+
+        # Skip empty parts
+        if not sentence.strip():
+            continue
+
+        # If adding this sentence exceeds max_length, finalize current chunk
+        if len(current_chunk) + len(sentence) > max_length:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+
+            # If single sentence is too long, split by words
+            if len(sentence) > max_length:
+                words = sentence.split()
+                temp_chunk = ""
+                for word in words:
+                    if len(temp_chunk) + len(word) + 1 <= max_length:
+                        temp_chunk += (" " if temp_chunk else "") + word
+                    else:
+                        if temp_chunk:
+                            chunks.append(temp_chunk.strip())
+                        temp_chunk = word
+                if temp_chunk:
+                    current_chunk = temp_chunk
+            else:
+                current_chunk = sentence
+        else:
+            current_chunk += sentence
+
+    # Add remaining chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
+def generate_tts_audio(text: str):
+    """
+    Generate TTS audio, handling chunking for long text.
+    Splits text into 200-char chunks, generates TTS for each,
+    then concatenates all audio arrays into a single stream.
+    Returns numpy array at 16kHz mono.
+    """
+    chunks = chunk_text_for_tts(text, max_length=200)
+    print(f"[TTS] Split into {len(chunks)} chunks for Orpheus")
+
+    all_audio_arrays = []
+
+    for i, chunk in enumerate(chunks):
+        print(f"[TTS] Processing chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
+
+        try:
+            # Try Orpheus TTS
+            tts_response = client.audio.speech.create(
+                model="canopylabs/orpheus-v1-english",
+                voice="autumn",
+                input=chunk,
+                response_format="wav"
+            )
+            wav_bytes = tts_response.read()
+            print(f"[TTS] Orpheus succeeded for chunk {i+1}")
+
+        except Exception as e:
+            print(f"[TTS] Orpheus failed for chunk {i+1}: {e}")
+            print("[TTS] Falling back to gTTS for this chunk...")
+
+            # Fallback to gTTS - remove expression tags
+            clean_chunk = re.sub(r'<[^>]+>', '', chunk)
+            tts = gTTS(text=clean_chunk, lang='en', tld='co.in')
+            mp3_buffer = io.BytesIO()
+            tts.write_to_fp(mp3_buffer)
+            mp3_buffer.seek(0)
+
+            # Convert MP3 to WAV
+            from pydub import AudioSegment
+            audio = AudioSegment.from_mp3(mp3_buffer)
+            wav_buffer = io.BytesIO()
+            audio.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            wav_bytes = wav_buffer.read()
+
+        # Parse WAV to get audio array
+        wav_buffer = io.BytesIO(wav_bytes)
+        with wave.open(wav_buffer, 'rb') as wav_file:
+            orig_rate = wav_file.getframerate()
+            orig_channels = wav_file.getnchannels()
+            pcm_data = wav_file.readframes(wav_file.getnframes())
+
+        # Convert to numpy array
+        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+        # Convert stereo to mono if needed
+        if orig_channels == 2:
+            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
+
+        # Resample to 16kHz if needed
+        if orig_rate != 16000:
+            num_samples = int(len(audio_array) * 16000 / orig_rate)
+            indices = np.linspace(0, len(audio_array) - 1, num_samples)
+            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.int16)
+            print(f"[TTS] Chunk {i+1} resampled from {orig_rate}Hz to 16kHz")
+
+        all_audio_arrays.append(audio_array)
+
+    # Concatenate all chunks
+    final_audio = np.concatenate(all_audio_arrays)
+    print(f"[TTS] Combined {len(chunks)} chunks into {len(final_audio)} samples")
+    print(f"[TTS] Total audio duration: {len(final_audio) / 16000:.2f} seconds")
+
+    return final_audio
 
 @app.post("/voice")
 async def process_voice(request: Request):
@@ -75,93 +229,37 @@ async def process_voice(request: Request):
         print(f"[ERR] Whisper STT failed: {e}")
         user_text = "Hello"  # Fallback to greeting
     
-    # 2. Generate AI response with LLM
+    # Add user message to conversation history
+    add_to_history("user", user_text)
+
+    # 2. Generate AI response with LLM (with conversation history)
     try:
-        print("[LLM] Generating response...")
+        print("[LLM] Generating response with conversation context...")
+        messages = get_conversation_messages()
+        messages.append({"role": "user", "content": user_text})
+
         chat_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text}
-            ],
-            max_tokens=500,  # Increased from 150 to allow longer responses
+            messages=messages,
+            max_tokens=500,  # Allow longer responses for better conversations
             temperature=0.7
         )
         ai_text = chat_response.choices[0].message.content.strip()
-        print(f"[LLM] AI response: {ai_text}")
+        print(f"[LLM] AI response ({len(ai_text)} chars): {ai_text}")
+
+        # Add AI response to conversation history
+        add_to_history("assistant", ai_text)
     except Exception as e:
         print(f"[ERR] LLM generation failed: {e}")
         ai_text = "Sorry, I'm having trouble thinking right now. Please try again."
+        add_to_history("assistant", ai_text)
     
-    # 3. Text-to-Speech with Orpheus (with gTTS fallback)
-    print("[TTS] Generating speech with Orpheus...")
+    # 3. Text-to-Speech with smart chunking (handles long responses)
+    print(f"[TTS] Generating speech for {len(ai_text)} character response...")
 
     try:
-        # Orpheus has 200 char limit - truncate if needed
-        tts_text = ai_text[:200] if len(ai_text) > 200 else ai_text
-        print(f"[TTS] Input length: {len(ai_text)} chars, using {len(tts_text)} for TTS")
-
-        # Orpheus returns WAV, we'll convert to raw PCM
-        tts_response = client.audio.speech.create(
-            model="canopylabs/orpheus-v1-english",
-            voice="autumn",
-            input=tts_text,
-            response_format="wav"
-        )
-        
-        # Get the WAV audio bytes
-        wav_bytes = tts_response.read()
-    except Exception as e:
-        print(f"[TTS] Orpheus failed: {e}")
-        print("[TTS] Falling back to Google TTS...")
-        
-        # Remove expression tags for gTTS (it doesn't support them)
-        clean_text = re.sub(r'<[^>]+>', '', ai_text)
-        
-        # Generate with gTTS
-        tts = gTTS(text=clean_text, lang='en', tld='co.in')  # Indian English accent
-        mp3_buffer = io.BytesIO()
-        tts.write_to_fp(mp3_buffer)
-        mp3_buffer.seek(0)
-        
-        # Convert MP3 to WAV using a simple approach
-        # For gTTS we return MP3 directly and let ESP32 handle it
-        # Actually, we need WAV for our pipeline - let's create a simple WAV
-        from pydub import AudioSegment
-        audio = AudioSegment.from_mp3(mp3_buffer)
-        wav_buffer = io.BytesIO()
-        audio.export(wav_buffer, format="wav")
-        wav_buffer.seek(0)
-        wav_bytes = wav_buffer.read()
-    
-    # Parse WAV and extract raw PCM
-    try:
-        wav_buffer = io.BytesIO(wav_bytes)
-        with wave.open(wav_buffer, 'rb') as wav_file:
-            orig_rate = wav_file.getframerate()
-            orig_channels = wav_file.getnchannels()
-            orig_width = wav_file.getsampwidth()
-            pcm_data = wav_file.readframes(wav_file.getnframes())
-
-        print(f"[AUDIO] Original format: {orig_rate}Hz, {orig_channels}ch, {orig_width*8}bit")
-
-        # Convert to numpy for resampling if needed
-        if orig_width == 2:
-            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-        else:
-            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-
-        # Convert stereo to mono first (for resampling)
-        if orig_channels == 2:
-            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
-
-        # Resample to 16kHz to reduce data transfer for cloud deployment
-        target_rate = 16000
-        if orig_rate != target_rate:
-            num_samples = int(len(audio_array) * target_rate / orig_rate)
-            indices = np.linspace(0, len(audio_array) - 1, num_samples)
-            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.int16)
-            print(f"[AUDIO] Resampled from {orig_rate}Hz to {target_rate}Hz")
+        # Use new chunked TTS generation function
+        audio_array = generate_tts_audio(ai_text)
 
         # Apply volume scaling to avoid clipping/brownout (50%)
         audio_array = (audio_array * 0.5).astype(np.int16)
@@ -172,8 +270,8 @@ async def process_voice(request: Request):
         stereo_array[1::2] = audio_array  # Right channel
 
         pcm_bytes = stereo_array.tobytes()
-        print(f"[TTS] Generated {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
-        print(f"[TTS] Audio duration: {len(audio_array) / target_rate:.2f} seconds")
+        print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
+        print(f"[AUDIO] Duration: {len(audio_array) / 16000:.2f} seconds")
         print(f"[SEND] Sending response to ESP32...")
 
         # Return raw PCM audio with transcription and AI response text in headers
