@@ -124,45 +124,79 @@ void setupSpeaker() {
     Serial.println("[SPK] Speaker initialized (16kHz)");
 }
 
-// ============== Play Beep Sound ==============
-void playBeep(int frequency, int durationMs) {
-    const int sampleRate = 16000;
-    const int numSamples = (sampleRate * durationMs) / 1000;
-    const float amplitude = 30000.0;
-    
-    int16_t* samples = (int16_t*)malloc(numSamples * 2 * sizeof(int16_t));
+// ============== Sound Effects System ==============
+// Alexa-style soothing sound effects for user feedback
+
+void playTone(int frequency, int duration_ms, float volume = 0.3) {
+    const int sample_rate = 16000;
+    const int num_samples = (sample_rate * duration_ms) / 1000;
+
+    int16_t* samples = (int16_t*)malloc(num_samples * 4); // stereo
     if (!samples) return;
-    
-    for (int i = 0; i < numSamples; i++) {
-        float t = (float)i / sampleRate;
-        int16_t sample = (int16_t)(amplitude * sin(2.0 * M_PI * frequency * t));
-        samples[i * 2] = sample;
-        samples[i * 2 + 1] = sample;
+
+    for (int i = 0; i < num_samples; i++) {
+        float t = (float)i / sample_rate;
+        int16_t value = (int16_t)(sin(2.0 * M_PI * frequency * t) * 32767 * volume);
+        samples[i * 2] = value;      // Left
+        samples[i * 2 + 1] = value;  // Right
     }
-    
-    size_t bytesWritten;
-    i2s_write(SPK_I2S_NUM, samples, numSamples * 2 * sizeof(int16_t), &bytesWritten, portMAX_DELAY);
+
+    size_t bytes_written;
+    i2s_write(SPK_I2S_NUM, samples, num_samples * 4, &bytes_written, portMAX_DELAY);
     free(samples);
-    i2s_zero_dma_buffer(SPK_I2S_NUM);
 }
 
-// ============== Play Melody ==============
-// 0: Startup, 1: Listening (Wake), 2: Processing, 3: Error
-void playMelody(int type) {
-    if (type == 0) { // Startup (Ascending)
-        playBeep(523, 150); // C5
-        delay(50);
-        playBeep(659, 150); // E5
-        delay(50);
-        playBeep(784, 200); // G5
-    } else if (type == 1) { // Listening (Alexa-like Ping)
-        playBeep(880, 100); // A5
-        playBeep(1100, 150); // C#6 (approx)
-    } else if (type == 2) { // Processing (Thinking)
-        playBeep(600, 100);
-        delay(50);
-        playBeep(600, 100);
+void playMelody(int* frequencies, int* durations, int count, float volume = 0.3) {
+    for (int i = 0; i < count; i++) {
+        if (frequencies[i] > 0) {
+            playTone(frequencies[i], durations[i], volume);
+        } else {
+            delay(durations[i]); // Rest/pause
+        }
     }
+}
+
+// Sound effect definitions
+void soundStartup() {
+    int freq[] = {523, 659, 784};  // C5, E5, G5 (C major chord ascending)
+    int dur[] = {150, 150, 300};
+    playMelody(freq, dur, 3, 0.2);
+}
+
+void soundMute() {
+    int freq[] = {880, 440};  // A5 to A4 (descending - going quiet)
+    int dur[] = {100, 200};
+    playMelody(freq, dur, 2, 0.15);
+}
+
+void soundUnmute() {
+    int freq[] = {440, 880};  // A4 to A5 (ascending - becoming active)
+    int dur[] = {100, 200};
+    playMelody(freq, dur, 2, 0.15);
+}
+
+void soundListening() {
+    int freq[] = {1047};  // C6 (high ping - attention)
+    int dur[] = {150};
+    playMelody(freq, dur, 1, 0.2);
+}
+
+void soundProcessing() {
+    int freq[] = {523, 659};  // C5, E5 (gentle pulse - thinking)
+    int dur[] = {200, 200};
+    playMelody(freq, dur, 2, 0.15);
+}
+
+void soundSuccess() {
+    int freq[] = {659, 784, 1047};  // E5, G5, C6 (rising - positive)
+    int dur[] = {100, 100, 200};
+    playMelody(freq, dur, 3, 0.2);
+}
+
+void soundError() {
+    int freq[] = {392, 330};  // G4, E4 (descending - error)
+    int dur[] = {200, 300};
+    playMelody(freq, dur, 2, 0.15);
 }
 
 // ============== WiFi Connection ==============
@@ -334,13 +368,14 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     http.begin(client, url);
     http.addHeader("Content-Type", "application/octet-stream");
     http.setTimeout(45000);  // Increased to 45s for backend processing time
-    
+
     setLedColor(0, 0, 255); // Blue (Processing)
-    playMelody(2); // Thinking Sound
-    
+    soundProcessing(); // Gentle pulse - thinking sound
+
     int httpCode = http.POST(audioData, audioSize);
-    
+
     if (httpCode == HTTP_CODE_OK) {
+        soundSuccess(); // Play success sound when response received
         WiFiClient* stream = http.getStreamPtr();
         int contentLength = http.getSize();
 
@@ -496,8 +531,12 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         Serial.println("[SPK] Playback complete");
     } else {
         Serial.printf("[HTTP] Error: %d\n", httpCode);
+        soundError(); // Play error sound for failed requests
+        setLedColor(255, 0, 0); // Red LED for error
+        delay(1000);
+        setLedColor(0, 0, 0); // Turn off LED
     }
-    
+
     http.end();
 }
 
@@ -505,9 +544,9 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 void startListening() {
     Serial.println("\n========== LISTENING ==========");
     setLedColor(0, 255, 255); // Cyan (Alexa Listening)
-    playMelody(1);  // Wake Sound
-    
-    
+    soundListening();  // High ping - attention sound
+
+
     size_t bytesRecorded = 0;
     uint8_t* audioData = recordAudio(&bytesRecorded);
     
@@ -536,16 +575,15 @@ void setup() {
     
     setupSpeaker();
     connectWiFi();
-    
-    Serial.println("[SPK] Playing startup beep...");
-    
+
     // Init LED
     pixels.begin();
     pixels.setBrightness(30); // Low brightness
     setLedColor(255, 100, 0); // Orange for Startup
-    
-    playMelody(0); // Startup Sound
-    
+
+    Serial.println("[SPK] Playing startup sound...");
+    soundStartup(); // Play pleasant startup chime
+
     setLedColor(0, 0, 0); // Off
     
     Serial.println("\n[READY] Say 'Hey Nova' or type 'l'\n");
@@ -561,14 +599,14 @@ void loop() {
             lastBtnTime = millis();
             
             Serial.printf("[SYSTEM] %s\n", isMuted ? "MUTED (Silent Mode)" : "UNMUTED (Listening)");
-            
+
             // Audio Feedback
             if (isMuted) {
                 setLedColor(255, 0, 0); // Red
-                playBeep(400, 200); 
+                soundMute(); // Descending tone - going quiet
             } else {
                 setLedColor(0, 0, 0); // Off
-                playBeep(1200, 200);
+                soundUnmute(); // Ascending tone - becoming active
             }
         }
     }
