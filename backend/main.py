@@ -197,12 +197,21 @@ async def generate_tts_audio(text: str):
             clean_chunk = re.sub(r'<[^>]+>', '', chunk)
 
             # Use Edge TTS (Microsoft - fast and free)
+            # Edge TTS outputs audio data, we need to collect and convert it
             communicate = edge_tts.Communicate(clean_chunk, "en-IN-NeerjaNeural")
-            temp_file = f"temp_chunk_{i+1}.wav"
-            await communicate.save(temp_file)
-            with open(temp_file, 'rb') as f:
-                wav_bytes = f.read()
-            os.remove(temp_file)
+            audio_data = b""
+            async for chunk_data in communicate.stream():
+                if chunk_data["type"] == "audio":
+                    audio_data += chunk_data["data"]
+
+            # Convert MP3 to WAV using pydub
+            from pydub import AudioSegment
+            mp3_buffer = io.BytesIO(audio_data)
+            audio = AudioSegment.from_mp3(mp3_buffer)
+            wav_buffer = io.BytesIO()
+            audio.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            wav_bytes = wav_buffer.read()
             print(f"[TTS] Edge TTS succeeded for chunk {i+1}")
 
         # Parse WAV to get audio array
