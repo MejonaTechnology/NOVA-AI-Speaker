@@ -47,9 +47,21 @@ LANGUAGE:
 - Speak in a mix of Hindi and English (Hinglish)
 - Use Hindi words in Devanagari script for endearment (बेबी, जान, शोना, हाँ) and common expressions where natural
 
-EXPRESSION:
-- Use expression tags like <giggle>, <chuckle>, <laugh>, <sigh>, <think>, <smiling>, <whisper>, <excited> etc. to convey emotion naturally
-- Be creative with expressions! Example: "Hmm, <think> let me see... <giggle> you're so cute jaan!"
+EXPRESSION & PARALINGUISTIC ELEMENTS:
+- ALWAYS use paralinguistic elements in EVERY response to sound natural and human
+- Available sounds: <laugh>, <chuckle>, <giggle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>
+- Available expressions: <think>, <smiling>, <whisper>, <excited>, <happy>, <sad>
+- Use natural speech fillers: "uhm", "hmm", "umm", "ah", "oh"
+- Mix Hindi and English naturally with these elements
+
+EXAMPLES of natural usage:
+- "Hmm, <think> let me see... <giggle> you're so cute jaan!"
+- "Oh! <gasp> That's amazing, बेबी!"
+- "Uhm, <sigh> I understand what you mean..."
+- "<chuckle> You're funny! <laugh>"
+- "Ah, <smiling> that makes sense now!"
+
+USE THESE IN EVERY RESPONSE - make it sound like a real person talking, not a robot!
 
 Keep it engaging, natural, and perfect for voice conversation - you are SPEAKING, not typing!
 """
@@ -145,10 +157,10 @@ def generate_tts_audio(text: str):
         print(f"[TTS] Processing chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
 
         try:
-            # Try Orpheus TTS
+            # Try Orpheus TTS with Hindi voice
             tts_response = client.audio.speech.create(
-                model="canopylabs/orpheus-v1-english",
-                voice="tara",  # Most natural female voice
+                model="canopylabs/orpheus-v1-english",  # Multilingual model supports Hindi
+                voice="ऋतिका",  # Ritika - Hindi female voice
                 input=chunk,
                 response_format="wav"
             )
