@@ -262,10 +262,53 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
         }
     }
 
-    *bytesRecorded = totalBytes;
     isRecording = false;
     float recordedSeconds = (millis() - startTime) / 1000.0;
-    Serial.printf("[REC] Recorded %d bytes in %.1f seconds\n", totalBytes, recordedSeconds);
+
+    // ============== Trim Silence from Recording ==============
+    if (totalBytes > 0) {
+        int16_t* samples = (int16_t*)audioBuffer;
+        size_t numSamples = totalBytes / 2;
+
+        // Find first non-silent sample
+        size_t startSample = 0;
+        for (size_t i = 0; i < numSamples; i++) {
+            if (abs(samples[i]) > SILENCE_THRESHOLD) {
+                startSample = i;
+                break;
+            }
+        }
+
+        // Find last non-silent sample
+        size_t endSample = numSamples - 1;
+        for (size_t i = numSamples - 1; i > startSample; i--) {
+            if (abs(samples[i]) > SILENCE_THRESHOLD) {
+                endSample = i;
+                break;
+            }
+        }
+
+        // Calculate trimmed size
+        size_t trimmedSamples = (endSample - startSample + 1);
+        size_t trimmedBytes = trimmedSamples * 2;
+
+        // Copy trimmed audio to beginning of buffer
+        if (startSample > 0) {
+            memmove(audioBuffer, audioBuffer + (startSample * 2), trimmedBytes);
+        }
+
+        size_t trimmedFromStart = startSample * 2;
+        size_t trimmedFromEnd = totalBytes - (endSample + 1) * 2;
+
+        Serial.printf("[REC] Recorded %d bytes in %.1f seconds\n", totalBytes, recordedSeconds);
+        Serial.printf("[REC] Trimmed %d bytes (start: %d, end: %d) → Final: %d bytes\n",
+            trimmedFromStart + trimmedFromEnd, trimmedFromStart, trimmedFromEnd, trimmedBytes);
+
+        *bytesRecorded = trimmedBytes;
+    } else {
+        Serial.printf("[REC] Recorded %d bytes in %.1f seconds\n", totalBytes, recordedSeconds);
+        *bytesRecorded = totalBytes;
+    }
 
     return audioBuffer;
 }
