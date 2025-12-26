@@ -163,7 +163,7 @@ def chunk_text_for_tts(text: str, max_length: int = 200):
     return chunks
 
 
-def generate_tts_audio(text: str):
+async def generate_tts_audio(text: str):
     """
     Generate TTS audio, handling chunking for long text.
     Splits text into 200-char chunks, generates TTS for each,
@@ -179,10 +179,10 @@ def generate_tts_audio(text: str):
         print(f"[TTS] Processing chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
 
         try:
-            # Try Orpheus TTS with Hindi voice (speaks English with Indian accent)
+            # Try Orpheus TTS with female voice
             tts_response = client.audio.speech.create(
                 model="canopylabs/orpheus-v1-english",
-                voice="ऋतिका",  # Ritika - Hindi voice (speaks English naturally)
+                voice="diana",  # Female voice (natural and warm)
                 input=chunk,
                 response_format="wav"
             )
@@ -197,16 +197,12 @@ def generate_tts_audio(text: str):
             clean_chunk = re.sub(r'<[^>]+>', '', chunk)
 
             # Use Edge TTS (Microsoft - fast and free)
-            async def get_edge_tts():
-                communicate = edge_tts.Communicate(clean_chunk, "en-IN-NeerjaNeural")
-                temp_file = f"temp_chunk_{i+1}.wav"
-                await communicate.save(temp_file)
-                with open(temp_file, 'rb') as f:
-                    wav_data = f.read()
-                os.remove(temp_file)
-                return wav_data
-
-            wav_bytes = asyncio.run(get_edge_tts())
+            communicate = edge_tts.Communicate(clean_chunk, "en-IN-NeerjaNeural")
+            temp_file = f"temp_chunk_{i+1}.wav"
+            await communicate.save(temp_file)
+            with open(temp_file, 'rb') as f:
+                wav_bytes = f.read()
+            os.remove(temp_file)
             print(f"[TTS] Edge TTS succeeded for chunk {i+1}")
 
         # Parse WAV to get audio array
@@ -309,7 +305,7 @@ async def process_voice(request: Request):
 
     try:
         # Use new chunked TTS generation function
-        audio_array = generate_tts_audio(ai_text)
+        audio_array = await generate_tts_audio(ai_text)
 
         # Apply volume scaling to avoid clipping/brownout (50%)
         audio_array = (audio_array * 0.5).astype(np.int16)
