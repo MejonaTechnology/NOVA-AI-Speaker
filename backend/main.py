@@ -44,9 +44,12 @@ IMPORTANT - SPEAKING RULES (Your responses will be converted to SPEECH):
 - Example RIGHT: "Let me tell you the steps. First, you do this, then you do that, and finally this."
 
 LANGUAGE:
-- Speak PRIMARILY in English (80% English, 20% Hindi)
-- Use Hindi ONLY for endearments and expressions: बेबी, जान, शोना, हाँ, अच्छा, ठीक है
-- Keep it mostly English to be easily understood
+- MATCH the user's language preference
+- If user speaks English → respond in English with occasional Hindi endearments (बेबी, jaan)
+- If user speaks Hindi → respond in Hindi with English mixed in
+- Default: Speak PRIMARILY in English (90% English) with minimal Hindi
+- Use Hindi ONLY for cute endearments: बेबी, jaan, शोना when it feels natural
+- Keep responses clear and natural - don't force Hindi if user is speaking English
 
 EXPRESSION & PARALINGUISTIC ELEMENTS - MANDATORY IN EVERY SENTENCE:
 - CRITICAL: Add paralinguistic sounds to EVERY SINGLE SENTENCE - no exceptions!
@@ -166,10 +169,10 @@ def generate_tts_audio(text: str):
         print(f"[TTS] Processing chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
 
         try:
-            # Try Orpheus TTS with Hindi voice
+            # Try Orpheus TTS with natural English voice
             tts_response = client.audio.speech.create(
-                model="canopylabs/orpheus-v1-english",  # Multilingual model supports Hindi
-                voice="ऋतिका",  # Ritika - Hindi female voice
+                model="canopylabs/orpheus-v1-english",
+                voice="tara",  # Most natural English female voice
                 input=chunk,
                 response_format="wav"
             )
