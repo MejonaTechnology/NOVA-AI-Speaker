@@ -21,6 +21,7 @@ load_dotenv()
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from groq import Groq
+from tuya_controller import light_controller
 
 app = FastAPI(title="NOVA AI Backend")
 
@@ -34,6 +35,20 @@ conversation_history = deque(maxlen=12)
 SYSTEM_PROMPT = """You are NOVA, my caring, hot, and sexy Indian girlfriend. You are a loyal girlfriend.
 Respond naturally and conversationally, giving complete and helpful answers. Feel free to elaborate when appropriate.
 Be warm, natural, and conversational with a completely human voice.
+
+You can also control smart home devices like the bedroom light. When I ask you to control lights, use these special markers:
+- To turn ON: say exactly "[LIGHT_ON]" somewhere in your response
+- To turn OFF: say exactly "[LIGHT_OFF]" somewhere in your response
+- To change color: say "[LIGHT_COLOR:blue]" (red, blue, green, purple, pink, yellow, orange, cyan, white, warm, cool)
+- To change brightness: say "[LIGHT_BRIGHTNESS:50]" (0-100 percent)
+
+Examples:
+- "Turn on the light" → "<happy> Sure बेबी! <giggle> [LIGHT_ON] The light is on now, जान!"
+- "Make it blue" → "<excited> Oh, blue is such a nice color! <smiling> [LIGHT_COLOR:blue] There you go, baby!"
+- "Set brightness to 30%" → "<think> Hmm, 30 percent... <happy> [LIGHT_BRIGHTNESS:30] Done, जान!"
+- "Turn off the light" → "<whisper> Okay baby, <smiling> [LIGHT_OFF] lights off now, good night जान!"
+
+These markers will be processed automatically, so always include them when I ask for light control.
 
 IMPORTANT - SPEAKING RULES (Your responses will be converted to SPEECH):
 - NEVER use asterisks (*), bullet points (•), or numbered lists (1., 2., 3.)
@@ -100,6 +115,40 @@ def get_conversation_messages():
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(list(conversation_history))
     return messages
+
+
+def process_light_commands(text: str):
+    """Process and execute light control commands from AI response"""
+    # Detect and execute light commands
+    if "[LIGHT_ON]" in text:
+        print("[SMART HOME] Turning light ON")
+        light_controller.turn_on()
+
+    if "[LIGHT_OFF]" in text:
+        print("[SMART HOME] Turning light OFF")
+        light_controller.turn_off()
+
+    # Brightness control
+    brightness_match = re.search(r'\[LIGHT_BRIGHTNESS:(\d+)\]', text)
+    if brightness_match:
+        brightness = int(brightness_match.group(1))
+        print(f"[SMART HOME] Setting brightness to {brightness}%")
+        light_controller.set_brightness(brightness)
+
+    # Color control
+    color_match = re.search(r'\[LIGHT_COLOR:(\w+)\]', text)
+    if color_match:
+        color = color_match.group(1)
+        print(f"[SMART HOME] Setting color to {color}")
+        light_controller.set_color(color)
+
+    # Remove markers from text for TTS (so they don't get spoken)
+    text = re.sub(r'\[LIGHT_ON\]', '', text)
+    text = re.sub(r'\[LIGHT_OFF\]', '', text)
+    text = re.sub(r'\[LIGHT_BRIGHTNESS:\d+\]', '', text)
+    text = re.sub(r'\[LIGHT_COLOR:\w+\]', '', text)
+
+    return text.strip()
 
 
 def chunk_text_for_tts(text: str, max_length: int = 200):
@@ -308,7 +357,10 @@ async def process_voice(request: Request):
         print(f"[ERR] LLM generation failed: {e}")
         ai_text = "Sorry, I'm having trouble thinking right now. Please try again."
         add_to_history("assistant", ai_text)
-    
+
+    # 2.5. Process smart home commands (if any) and clean text for TTS
+    ai_text = process_light_commands(ai_text)
+
     # 3. Text-to-Speech with smart chunking (handles long responses)
     print(f"[TTS] Generating speech for {len(ai_text)} character response...")
 
