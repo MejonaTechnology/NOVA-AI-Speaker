@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 from gtts import gTTS
 import re
+from urllib.parse import quote
 
 # Load environment variables from .env file
 load_dotenv()
@@ -94,13 +95,17 @@ async def process_voice(request: Request):
     
     # 3. Text-to-Speech with Orpheus (with gTTS fallback)
     print("[TTS] Generating speech with Orpheus...")
-    
+
     try:
+        # Orpheus has 200 char limit - truncate if needed
+        tts_text = ai_text[:200] if len(ai_text) > 200 else ai_text
+        print(f"[TTS] Input length: {len(ai_text)} chars, using {len(tts_text)} for TTS")
+
         # Orpheus returns WAV, we'll convert to raw PCM
         tts_response = client.audio.speech.create(
             model="canopylabs/orpheus-v1-english",
             voice="autumn",
-            input=ai_text,
+            input=tts_text,
             response_format="wav"
         )
         
@@ -179,7 +184,7 @@ async def process_voice(request: Request):
                 "X-Audio-Sample-Rate": "16000",
                 "X-Audio-Channels": "2",
                 "X-Audio-Bits": "16",
-                "X-AI-Response": ai_text[:200],  # Limit to 200 chars for header
+                "X-AI-Response": quote(ai_text[:200], safe=''),  # URL-encode to handle Devanagari/Hindi chars
                 "Content-Length": str(len(pcm_bytes))
             }
         )
