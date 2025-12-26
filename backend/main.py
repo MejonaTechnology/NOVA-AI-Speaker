@@ -169,10 +169,10 @@ def generate_tts_audio(text: str):
         print(f"[TTS] Processing chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
 
         try:
-            # Try Orpheus TTS with natural English voice
+            # Try Orpheus TTS with Hindi voice (speaks English with Indian accent)
             tts_response = client.audio.speech.create(
                 model="canopylabs/orpheus-v1-english",
-                voice="tara",  # Most natural English female voice
+                voice="ऋतिका",  # Ritika - Hindi voice (speaks English naturally)
                 input=chunk,
                 response_format="wav"
             )
