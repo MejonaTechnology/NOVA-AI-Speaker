@@ -26,7 +26,7 @@
 // ============== Audio Settings ==============
 #define SAMPLE_RATE         16000
 #define BITS_PER_SAMPLE     16
-#define RECORD_SECONDS      4
+#define RECORD_SECONDS      3
 #define I2S_BUFFER_SIZE     1024
 
 // Calculated values

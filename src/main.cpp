@@ -244,6 +244,15 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     if (httpCode == HTTP_CODE_OK) {
         WiFiClient* stream = http.getStreamPtr();
         int contentLength = http.getSize();
+
+        // Get AI response text from custom header
+        String aiResponse = http.header("X-AI-Response");
+        if (aiResponse.length() > 0) {
+            Serial.println("\n========== AI RESPONSE ==========");
+            Serial.println(aiResponse);
+            Serial.println("=================================\n");
+        }
+
         Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
 
         // ============================================

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(pio run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfix(playback): Fix ESP32 audio stopping prematurely with improved timeout handling\n\nISSUES FIXED:\n- Audio playback stopping in middle saying \"playback complete\"\n- 5-second timeout was too short for backend processing (STT + LLM + TTS = 5-8s)\n- Stream timeout occurring before backend finished sending audio\n\nESP32 CHANGES (src/main.cpp):\n- Increased HTTP timeout from 30s to 45s for backend processing\n- Separated timeout logic: 30s for first byte, 10s between chunks\n- Added progress indicators (prints every 50KB downloaded/streamed)\n- Improved download loop to wait for backend processing before timing out\n- Enhanced streaming mode with same timeout improvements\n- Added detailed logging for debugging playback issues\n\nBACKEND CHANGES (backend/main.py):\n- Fixed comment: Changed \"24kHz\" to \"16kHz\" (correct sample rate)\n- Added comprehensive error handling for all stages:\n  * Request body reading\n  * Whisper STT transcription\n  * LLM response generation\n  * Audio processing pipeline\n- Added Content-Length header for better ESP32 download tracking\n- Added audio format and duration logging\n- Added detailed audio processing logs (format, resampling info)\n- Added traceback printing for audio processing errors\n\nTECHNICAL DETAILS:\n- Before: Timeout after 5s of no data (too aggressive)\n- After: Wait 30s for backend to start sending, then 10s between chunks\n- This accounts for Groq API processing time (5-8s typical)\n- Prevents premature completion detection\n\nTESTING NOTES:\n- Build successful (109s, RAM: 19.6%, Flash: 27.7%)\n- Ready for deployment and testing with full audio responses\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git commit:*)",
+      "Bash(curl:*)",
+      "Bash(python main.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

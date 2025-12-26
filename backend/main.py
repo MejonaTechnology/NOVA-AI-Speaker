@@ -171,7 +171,7 @@ async def process_voice(request: Request):
         print(f"[TTS] Audio duration: {len(audio_array) / target_rate:.2f} seconds")
         print(f"[SEND] Sending response to ESP32...")
 
-        # Return raw PCM audio
+        # Return raw PCM audio with AI response text in header
         return Response(
             content=pcm_bytes,
             media_type="application/octet-stream",
@@ -179,6 +179,7 @@ async def process_voice(request: Request):
                 "X-Audio-Sample-Rate": "16000",
                 "X-Audio-Channels": "2",
                 "X-Audio-Bits": "16",
+                "X-AI-Response": ai_text[:200],  # Limit to 200 chars for header
                 "Content-Length": str(len(pcm_bytes))
             }
         )
