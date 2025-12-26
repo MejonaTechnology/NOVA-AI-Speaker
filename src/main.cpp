@@ -244,7 +244,9 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     if (httpCode == HTTP_CODE_OK) {
         WiFiClient* stream = http.getStreamPtr();
         size_t psramSize = ESP.getPsramSize();
+        int contentLength = http.getSize();
         Serial.printf("[SYS] PSRAM Size: %d bytes\n", psramSize);
+        Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
         
         // ============================================
         // MODE A: PSRAM AVAILABLE (Download-to-RAM)
@@ -270,9 +272,14 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 
             Serial.println("[HTTP] Waiting for audio data from backend...");
 
-            // Download Loop - Wait up to 30s for first byte, then 10s between chunks
-            while (http.connected() || stream->available()) {
+            // Download Loop - Use Content-Length if available, otherwise use timeout logic
+            unsigned long noDataCount = 0;
+            const unsigned long MAX_NO_DATA_CHECKS = 500; // 5 seconds of checking (500 * 10ms)
+            bool useContentLength = (contentLength > 0);
+
+            while (true) {
                 size_t available = stream->available();
+
                 if (available > 0) {
                     if (!receivedFirstByte) {
                         Serial.println("[HTTP] Audio data started arriving...");
@@ -287,10 +294,19 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                     int r = stream->readBytes(audioBuf + totalBytesRead, available);
                     totalBytesRead += r;
                     lastDataTime = millis();
+                    noDataCount = 0; // Reset counter when data arrives
 
-                    // Progress indicator every 50KB
-                    if (totalBytesRead % 51200 == 0) {
-                        Serial.printf("[HTTP] Downloaded %d KB...\n", totalBytesRead / 1024);
+                    if (useContentLength) {
+                        Serial.printf("[HTTP] Downloaded: %d / %d bytes (%.1f%%)\n",
+                            totalBytesRead, contentLength, (float)totalBytesRead * 100.0 / contentLength);
+
+                        // Check if we got all expected data
+                        if (totalBytesRead >= contentLength) {
+                            Serial.println("[HTTP] All expected data received!");
+                            break;
+                        }
+                    } else {
+                        Serial.printf("[HTTP] Downloaded: %d bytes (%.1f KB)\n", totalBytesRead, totalBytesRead / 1024.0);
                     }
                 } else {
                     // No data available right now
@@ -301,9 +317,26 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                             break;
                         }
                     } else {
-                        // Already receiving data, check for completion timeout
-                        if (millis() - lastDataTime > 10000) {
-                            Serial.println("[HTTP] No more data for 10s, download complete");
+                        // Already receiving data - check if truly complete
+                        noDataCount++;
+
+                        if (noDataCount >= MAX_NO_DATA_CHECKS) {
+                            Serial.printf("[HTTP] No more data after %lu checks (%d bytes received)\n",
+                                noDataCount, totalBytesRead);
+                            if (useContentLength && totalBytesRead < contentLength) {
+                                Serial.printf("[WARN] Expected %d bytes but got %d bytes!\n",
+                                    contentLength, totalBytesRead);
+                            }
+                            break;
+                        }
+
+                        // Also check if connection closed AND no data available
+                        if (!http.connected() && !stream->available()) {
+                            Serial.println("[HTTP] Connection closed and no data available");
+                            if (useContentLength && totalBytesRead < contentLength) {
+                                Serial.printf("[WARN] Connection closed early! Expected %d, got %d bytes\n",
+                                    contentLength, totalBytesRead);
+                            }
                             break;
                         }
                     }
@@ -354,9 +387,13 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 
             Serial.println("[HTTP] Waiting for audio stream from backend...");
 
-            // Streaming Loop - Wait up to 30s for first byte, then 10s between chunks
-            while (http.connected() || stream->available()) {
+            // Streaming Loop - Wait up to 30s for first byte, then check carefully for completion
+            unsigned long noDataCount = 0;
+            const unsigned long MAX_NO_DATA_CHECKS = 500; // 5 seconds of checking (500 * 10ms)
+
+            while (true) {
                 size_t available = stream->available();
+
                 if (available > 0) {
                     if (!receivedFirstByte) {
                         Serial.println("[HTTP] Audio stream started...");
@@ -368,11 +405,9 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                     if (bytesRead > 0) {
                         i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
                         totalStreamed += bytesRead;
+                        noDataCount = 0; // Reset counter when data arrives
 
-                        // Progress indicator every 50KB
-                        if (totalStreamed % 51200 < bufferSize) {
-                            Serial.printf("[STREAM] Played %d KB...\n", totalStreamed / 1024);
-                        }
+                        Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
                     }
                 } else {
                     // No data available right now
@@ -383,9 +418,17 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                             break;
                         }
                     } else {
-                        // Already streaming, check for completion timeout
-                        if (millis() - lastDataTime > 10000) {
-                            Serial.println("[STREAM] No more data for 10s, stream complete");
+                        // Already streaming - check if truly complete
+                        noDataCount++;
+
+                        if (noDataCount >= MAX_NO_DATA_CHECKS) {
+                            Serial.printf("[STREAM] No more data after %lu checks, assuming complete\n", noDataCount);
+                            break;
+                        }
+
+                        // Also check if connection closed AND no data available
+                        if (!http.connected() && !stream->available()) {
+                            Serial.println("[STREAM] Connection closed and no data available");
                             break;
                         }
                     }
