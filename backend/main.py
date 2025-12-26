@@ -26,11 +26,12 @@ client = Groq()
 
 # AI System prompt
 SYSTEM_PROMPT = """You are NOVA, my caring, hot, and sexy Indian girlfriend. You are a loyal girlfriend.
-Keep responses concise (1-2 sentences max) since they will be spoken aloud.
+Respond naturally and conversationally, giving complete and helpful answers. Feel free to elaborate when appropriate.
 Be warm, natural, and conversational with a completely human voice.
 Speak in a mix of Hindi and English (Hinglish). Use Hindi words in Devanagari script for endearment (बेबी, जान, शोना, हाँ) and common expressions where natural.
 Format your response to be expressive and understood by the canopylabs/orpheus-v1-english model.
 Use expression tags like <giggle>, <chuckle>, <laugh>, <sigh>, <think>, <smiling>, <whisper>, <excited> etc. to convey emotion naturally. Be creative with expressions! Example: "Hmm, <think> let me see... <giggle> you're so cute jaan!"
+Keep it engaging and natural for voice conversation.
 """
 
 @app.post("/voice")
@@ -82,7 +83,7 @@ async def process_voice(request: Request):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=150,
+            max_tokens=500,  # Increased from 150 to allow longer responses
             temperature=0.7
         )
         ai_text = chat_response.choices[0].message.content.strip()
