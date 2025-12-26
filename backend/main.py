@@ -148,7 +148,7 @@ def generate_tts_audio(text: str):
             # Try Orpheus TTS
             tts_response = client.audio.speech.create(
                 model="canopylabs/orpheus-v1-english",
-                voice="autumn",
+                voice="tara",  # Most natural female voice
                 input=chunk,
                 response_format="wav"
             )
