@@ -14,6 +14,8 @@ import asyncio
 import re
 from urllib.parse import quote
 from collections import deque
+from datetime import datetime
+import pytz
 
 # Load environment variables from .env file
 load_dotenv()
@@ -110,9 +112,34 @@ def add_to_history(role: str, content: str):
     print(f"[HISTORY] Added {role} message (Total: {len(conversation_history)} messages)")
 
 
+def get_current_time_info():
+    """Get current IST time and date information"""
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+
+    time_info = f"""
+CURRENT DATE & TIME (Indian Standard Time - IST):
+- Current Date: {now.strftime('%A, %B %d, %Y')}
+- Current Time: {now.strftime('%I:%M %p')} IST
+- 24-hour format: {now.strftime('%H:%M')}
+- Day of Week: {now.strftime('%A')}
+- Month: {now.strftime('%B')}
+- Year: {now.year}
+
+Use this information to answer time-related questions accurately.
+"""
+    return time_info
+
+
 def get_conversation_messages():
-    """Get messages for LLM (system + history)"""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    """Get messages for LLM (system + history with current time)"""
+    # Get current time information
+    time_info = get_current_time_info()
+
+    # Combine system prompt with current time info
+    system_content = SYSTEM_PROMPT + "\n\n" + time_info
+
+    messages = [{"role": "system", "content": system_content}]
     messages.extend(list(conversation_history))
     return messages
 
