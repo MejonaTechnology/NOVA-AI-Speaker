@@ -9,7 +9,8 @@ import struct
 import numpy as np
 import os
 from dotenv import load_dotenv
-from gtts import gTTS
+import edge_tts
+import asyncio
 import re
 from urllib.parse import quote
 from collections import deque
@@ -190,22 +191,23 @@ def generate_tts_audio(text: str):
 
         except Exception as e:
             print(f"[TTS] Orpheus failed for chunk {i+1}: {e}")
-            print("[TTS] Falling back to gTTS for this chunk...")
+            print("[TTS] Falling back to Edge TTS for this chunk...")
 
-            # Fallback to gTTS - remove expression tags
+            # Fallback to Edge TTS - remove expression tags
             clean_chunk = re.sub(r'<[^>]+>', '', chunk)
-            tts = gTTS(text=clean_chunk, lang='en', tld='co.in')
-            mp3_buffer = io.BytesIO()
-            tts.write_to_fp(mp3_buffer)
-            mp3_buffer.seek(0)
 
-            # Convert MP3 to WAV
-            from pydub import AudioSegment
-            audio = AudioSegment.from_mp3(mp3_buffer)
-            wav_buffer = io.BytesIO()
-            audio.export(wav_buffer, format="wav")
-            wav_buffer.seek(0)
-            wav_bytes = wav_buffer.read()
+            # Use Edge TTS (Microsoft - fast and free)
+            async def get_edge_tts():
+                communicate = edge_tts.Communicate(clean_chunk, "en-IN-NeerjaNeural")
+                temp_file = f"temp_chunk_{i+1}.wav"
+                await communicate.save(temp_file)
+                with open(temp_file, 'rb') as f:
+                    wav_data = f.read()
+                os.remove(temp_file)
+                return wav_data
+
+            wav_bytes = asyncio.run(get_edge_tts())
+            print(f"[TTS] Edge TTS succeeded for chunk {i+1}")
 
         # Parse WAV to get audio array
         wav_buffer = io.BytesIO(wav_bytes)
