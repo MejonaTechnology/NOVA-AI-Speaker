@@ -16,6 +16,9 @@ from urllib.parse import quote
 from collections import deque
 from datetime import datetime
 import pytz
+import requests
+import asyncio
+from threading import Thread
 
 # Load environment variables from .env file
 load_dotenv()
@@ -32,6 +35,16 @@ client = Groq()
 
 # Global conversation history (max 6 exchanges = 12 messages)
 conversation_history = deque(maxlen=12)
+
+# Weather cache (updated every 5 minutes)
+weather_data = {
+    "last_update": None,
+    "temperature": None,
+    "condition": None,
+    "humidity": None,
+    "wind_speed": None,
+    "location": "Whitefield, Bangalore"
+}
 
 # AI System prompt
 SYSTEM_PROMPT = """You are NOVA, my caring, hot, and sexy Indian girlfriend. You are a loyal girlfriend.
@@ -112,6 +125,56 @@ def add_to_history(role: str, content: str):
     print(f"[HISTORY] Added {role} message (Total: {len(conversation_history)} messages)")
 
 
+def fetch_weather():
+    """Fetch weather data for Whitefield, Bangalore using wttr.in"""
+    global weather_data
+    try:
+        # Using wttr.in API (no API key required)
+        url = "https://wttr.in/Whitefield,Bangalore?format=j1"
+        response = requests.get(url, timeout=5)
+
+        if response.status_code == 200:
+            data = response.json()
+            current = data['current_condition'][0]
+
+            weather_data.update({
+                "last_update": datetime.now(pytz.timezone('Asia/Kolkata')),
+                "temperature": int(current['temp_C']),
+                "feels_like": int(current['FeelsLikeC']),
+                "condition": current['weatherDesc'][0]['value'],
+                "humidity": int(current['humidity']),
+                "wind_speed": int(current['windspeedKmph']),
+                "wind_dir": current['winddir16Point'],
+                "visibility": int(current['visibility']),
+                "pressure": int(current['pressure']),
+                "uv_index": int(current['uvIndex'])
+            })
+            print(f"[WEATHER] Updated: {weather_data['temperature']}°C, {weather_data['condition']}")
+        else:
+            print(f"[WEATHER] Failed to fetch: HTTP {response.status_code}")
+    except Exception as e:
+        print(f"[WEATHER] Error fetching weather: {e}")
+
+
+def get_weather_info():
+    """Get formatted weather information"""
+    if weather_data["last_update"] is None:
+        return ""
+
+    weather_info = f"""
+CURRENT WEATHER ({weather_data['location']}):
+- Temperature: {weather_data['temperature']}°C (Feels like {weather_data['feels_like']}°C)
+- Conditions: {weather_data['condition']}
+- Humidity: {weather_data['humidity']}%
+- Wind: {weather_data['wind_speed']} km/h {weather_data['wind_dir']}
+- Visibility: {weather_data['visibility']} km
+- Pressure: {weather_data['pressure']} mb
+- UV Index: {weather_data['uv_index']}
+- Last Updated: {weather_data['last_update'].strftime('%I:%M %p IST')}
+"""
+    return weather_info
+
+
 def get_current_time_info():
     """Get current IST time and date information"""
     ist = pytz.timezone('Asia/Kolkata')
@@ -132,16 +195,36 @@ Use this information to answer time-related questions accurately.
 
 
 def get_conversation_messages():
-    """Get messages for LLM (system + history with current time)"""
+    """Get messages for LLM (system + history with current time and weather)"""
     # Get current time information
     time_info = get_current_time_info()
 
-    # Combine system prompt with current time info
-    system_content = SYSTEM_PROMPT + "\n\n" + time_info
+    # Get weather information
+    weather_info = get_weather_info()
+
+    # Combine system prompt with current time and weather info
+    system_content = SYSTEM_PROMPT + "\n\n" + time_info + weather_info
 
     messages = [{"role": "system", "content": system_content}]
     messages.extend(list(conversation_history))
     return messages
+
+
+async def update_weather_periodically():
+    """Background task to update weather every 5 minutes"""
+    while True:
+        fetch_weather()
+        await asyncio.sleep(300)  # 5 minutes = 300 seconds
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Run on application startup"""
+    # Fetch weather immediately on startup
+    fetch_weather()
+    # Start background task for periodic weather updates
+    asyncio.create_task(update_weather_periodically())
+    print("[STARTUP] Weather monitoring started (updates every 5 minutes)")
 
 
 def process_light_commands(text: str):
