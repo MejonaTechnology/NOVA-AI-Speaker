@@ -29,6 +29,7 @@ bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
 static bool micReady = false;
+bool otaMode = false;  // OTA update mode flag
 
 // ============== Emotion Control ==============
 enum Emotion {
@@ -1375,7 +1376,48 @@ void loop() {
         char cmd = Serial.read();
         if (cmd == 'l' || cmd == 'L') {
             startListening();
+        } else if (cmd == 'o' || cmd == 'O') {
+            // Enter OTA mode
+            Serial.println("\n[OTA] Entering OTA mode...");
+            Serial.println("[OTA] All tasks paused, ready for wireless update");
+            Serial.println("[OTA] Send 'x' to exit OTA mode");
+            otaMode = true;
+
+            // Show OTA mode on OLED
+            display.clearDisplay();
+            display.setTextSize(2);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(10, 10);
+            display.println("OTA MODE");
+            display.setTextSize(1);
+            display.setCursor(5, 35);
+            display.println("Ready for Update");
+            display.setCursor(10, 50);
+            display.println("192.168.31.115");
+            display.display();
+
+            // Set LED to orange (OTA mode indicator)
+            setLedColor(255, 165, 0);
+        } else if (cmd == 'x' || cmd == 'X') {
+            // Exit OTA mode
+            if (otaMode) {
+                Serial.println("[OTA] Exiting OTA mode...");
+                otaMode = false;
+                setLedColor(0, 0, 0);
+                if (!isMuted) {
+                    displayFaceIdleAnimated();
+                } else {
+                    displayFaceSleeping();
+                }
+            }
         }
+    }
+
+    // In OTA mode, skip all tasks except OTA handling
+    if (otaMode) {
+        // Only handle OTA updates in this mode
+        // ArduinoOTA.handle() is already called at the start of loop()
+        return;  // Skip all other processing
     }
 
     // Update idle animation when active (not muted)
