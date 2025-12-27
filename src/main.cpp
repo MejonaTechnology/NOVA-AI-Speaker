@@ -10,8 +10,8 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.85f  // Confidence threshold for wake word
-#define CONSECUTIVE_DETECTIONS 2    // Require consecutive detections
+#define WAKE_WORD_CONFIDENCE 0.75f  // Confidence threshold for wake word (lower = more sensitive)
+#define CONSECUTIVE_DETECTIONS 1    // Require consecutive detections (1 = faster response)
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -631,9 +631,9 @@ void loop() {
             return;
         }
 
-        // Apply 5x Gain (Software amplification)
+        // Apply 10x Gain (Software amplification for far-field detection)
         for (int i = 0; i < bytesRead / 2; i++) {
-            int32_t sample = audioBuffer[i] * 5;
+            int32_t sample = audioBuffer[i] * 10;
             if (sample > 32767) sample = 32767;
             if (sample < -32768) sample = -32768;
             audioBuffer[i] = (int16_t)sample;
