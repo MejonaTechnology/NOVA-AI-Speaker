@@ -41,4 +41,12 @@
 #define RGB_LED_PIN         48
 #define NUM_LEDS            1
 
+// ============== OLED Display (I2C) ==============
+#define OLED_SDA            21
+#define OLED_SCL            20
+#define OLED_WIDTH          128
+#define OLED_HEIGHT         64
+#define OLED_RESET          -1  // No reset pin (use -1)
+#define OLED_ADDRESS        0x3C  // Common I2C address (0x3C or 0x3D)
+
 #endif // CONFIG_H

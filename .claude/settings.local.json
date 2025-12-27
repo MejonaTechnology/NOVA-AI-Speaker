@@ -17,7 +17,14 @@
       "Bash(ssh -i \"D:\\Mejona Workspace\\Product\\Home-Assistant\\oci_key_new\" ubuntu@161.118.184.207 \"sudo docker ps -a\")",
       "Bash(ssh:*)",
       "Bash(python test_chunking.py:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(pip install:*)",
+      "Bash(python test_edge_tts.py:*)",
+      "Bash(python test_tuya.py:*)",
+      "Bash(timeout 10 python:*)",
+      "Bash(python:*)",
+      "Bash(unzip:*)",
+      "Bash(Threshold: 0.95\"\n- Listening: Large \"Listening\" text\n- Processing: Large \"Processing\" text\n- Muted: Large \"MUTED\" text\n\nHARDWARE CONFIGURATION:\n- OLED: 128x64 I2C display (address 0x3C)\n- Pins: SDA=21, SCL=20 (non-conflicting with audio/LED)\n- Compatible with standard SSD1306 OLED modules\n\nMEMORY USAGE:\n- RAM: 17.3% (56,840 bytes) - +0.1% for OLED\n- Flash: 28.7% (903,337 bytes) - +1.0% for OLED libraries\n- Still well within ESP32-S3 limits\n\nTESTING:\n- Build successful (116s)\n- All libraries compiled without errors\n- Firmware uploaded and verified\n- Ready for testing with OLED hardware\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
     ],
     "deny": [],
     "ask": []

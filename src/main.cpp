@@ -4,13 +4,16 @@
 #include <WiFiClientSecure.h>
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "config.h"
 
 // Edge Impulse Wake Word
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.90f  // Confidence threshold for wake word (higher = more accurate)
+#define WAKE_WORD_CONFIDENCE 0.95f  // Confidence threshold for wake word (higher = more accurate, fewer false positives)
 #define CONSECUTIVE_DETECTIONS 1    // Require consecutive detections (1 = faster response)
 
 // ============== Button Configuration ==============
@@ -28,6 +31,9 @@ static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
 
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// ============== OLED Display Setup ==============
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 
 // ============== Helper Functions ==============
 int hexToDec(char c) {
@@ -122,6 +128,60 @@ void setupSpeaker() {
     Serial.println("[SPK] Speaker initialized (16kHz)");
 }
 
+// ============== OLED Display Functions ==============
+void setupOLED() {
+    Wire.begin(OLED_SDA, OLED_SCL);
+
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+        Serial.println("[OLED] Initialization failed!");
+        return;
+    }
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("NOVA AI");
+    display.println("Initializing...");
+    display.display();
+    Serial.println("[OLED] Display initialized");
+}
+
+void displayMessage(const char* line1, const char* line2 = "", const char* line3 = "", const char* line4 = "") {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+
+    display.setCursor(0, 0);
+    display.println(line1);
+
+    if (strlen(line2) > 0) {
+        display.setCursor(0, 16);
+        display.println(line2);
+    }
+
+    if (strlen(line3) > 0) {
+        display.setCursor(0, 32);
+        display.println(line3);
+    }
+
+    if (strlen(line4) > 0) {
+        display.setCursor(0, 48);
+        display.println(line4);
+    }
+
+    display.display();
+}
+
+void displayStatus(const char* status) {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 20);
+    display.println(status);
+    display.display();
+}
+
 // ============== Sound Effects System ==============
 // Alexa-style soothing sound effects for user feedback
 
@@ -201,22 +261,29 @@ void soundError() {
 void connectWiFi() {
     Serial.print("[WIFI] Connecting to ");
     Serial.println(WIFI_SSID);
-    
+
+    displayMessage("NOVA AI", "Connecting WiFi...");
+
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
+
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(500);
         Serial.print(".");
         attempts++;
     }
-    
+
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println();
         Serial.print("[WIFI] Connected! IP: ");
         Serial.println(WiFi.localIP());
+
+        displayMessage("NOVA AI", "WiFi Connected", WiFi.localIP().toString().c_str());
+        delay(2000);
     } else {
         Serial.println("\n[WIFI] Connection failed!");
+        displayMessage("NOVA AI", "WiFi Failed!");
+        delay(2000);
     }
 }
 
@@ -542,17 +609,20 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 void startListening() {
     Serial.println("\n========== LISTENING ==========");
     setLedColor(0, 255, 255); // Cyan (Alexa Listening)
+    displayStatus("Listening");
     soundListening();  // High ping - attention sound
 
 
     size_t bytesRecorded = 0;
     uint8_t* audioData = recordAudio(&bytesRecorded);
-    
+
     if (audioData && bytesRecorded > 0) {
+        displayStatus("Processing");
         sendAndPlay(audioData, bytesRecorded);
         free(audioData);
     }
 
+    displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
     Serial.println("================================\n");
     consecutiveWakeDetections = 0;  // Reset wake word counter
 }
@@ -567,11 +637,16 @@ void setup() {
     Serial.println("========================================\n");
     
     setupMicrophone();
-    
+
     // Setup Button (GPIO 0 - Boot Button)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
-    
+
     setupSpeaker();
+
+    // Setup OLED Display
+    setupOLED();
+    displayMessage("NOVA AI", "Speaker Init...");
+
     connectWiFi();
 
     // Init LED
@@ -583,7 +658,11 @@ void setup() {
     soundStartup(); // Play pleasant startup chime
 
     setLedColor(0, 0, 0); // Off
-    
+
+    displayStatus("READY");
+    delay(1000);
+    displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
+
     Serial.println("\n[READY] Say 'Hey Nova' or type 'l'\n");
 }
 
@@ -601,9 +680,11 @@ void loop() {
             // Audio Feedback
             if (isMuted) {
                 setLedColor(255, 0, 0); // Red
+                displayStatus("MUTED");
                 soundMute(); // Descending tone - going quiet
             } else {
                 setLedColor(0, 0, 0); // Off
+                displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
                 soundUnmute(); // Ascending tone - becoming active
             }
         }
