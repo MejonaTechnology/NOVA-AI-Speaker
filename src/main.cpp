@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <ArduinoOTA.h>
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
@@ -18,13 +19,35 @@
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
+#define LONG_PRESS_TIME 3000  // 3 seconds for power off
 bool isMuted = false;
+unsigned long buttonPressStart = 0;
+bool buttonWasPressed = false;
 
 // ============== Global State ==============
 bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
 static bool micReady = false;
+
+// ============== Emotion Control ==============
+enum Emotion {
+    EMOTION_NORMAL,
+    EMOTION_HAPPY,
+    EMOTION_SAD,
+    EMOTION_EXCITED,
+    EMOTION_SCARED,
+    EMOTION_SHOCK,
+    EMOTION_ANGRY,
+    EMOTION_ROMANTIC,
+    EMOTION_COLD,
+    EMOTION_HOT,
+    EMOTION_SERIOUS,
+    EMOTION_CONFUSED,
+    EMOTION_CURIOUS,
+    EMOTION_SLEEPY
+};
+Emotion currentEmotion = EMOTION_NORMAL;
 
 // Audio buffers for wake word
 static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
@@ -299,23 +322,338 @@ void displayFaceProcessing() {
 
 void displayFaceHappy() {
     display.clearDisplay();
-
-    // Face outline
     display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Happy eyes (curved up)
+    // Happy eyes (large pupils)
     display.fillCircle(35, 25, 12, SSD1306_WHITE);
     display.fillCircle(35, 25, 10, SSD1306_BLACK);
     display.fillCircle(35, 25, 7, SSD1306_WHITE);
-
     display.fillCircle(93, 25, 12, SSD1306_WHITE);
     display.fillCircle(93, 25, 10, SSD1306_BLACK);
     display.fillCircle(93, 25, 7, SSD1306_WHITE);
-
-    // Smiling mouth (arc)
+    // Smiling mouth
     display.drawCircle(64, 35, 15, SSD1306_WHITE);
-    display.fillRect(10, 5, 108, 35, SSD1306_BLACK);  // Erase top half of circle
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);  // Redraw face
+    display.fillRect(10, 5, 108, 35, SSD1306_BLACK);
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceSad() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Sad eyes (small pupils, looking down)
+    display.fillCircle(35, 27, 12, SSD1306_WHITE);
+    display.fillCircle(35, 27, 10, SSD1306_BLACK);
+    display.fillCircle(35, 30, 4, SSD1306_WHITE);
+    display.fillCircle(93, 27, 12, SSD1306_WHITE);
+    display.fillCircle(93, 27, 10, SSD1306_BLACK);
+    display.fillCircle(93, 30, 4, SSD1306_WHITE);
+    // Frowning mouth
+    display.drawCircle(64, 52, 12, SSD1306_WHITE);
+    display.fillRect(10, 40, 108, 20, SSD1306_BLACK);
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceExcited() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Wide eyes animation
+    for (int i = 0; i < 2; i++) {
+        display.fillCircle(35, 25, 14, SSD1306_WHITE);
+        display.fillCircle(35, 25, 12, SSD1306_BLACK);
+        display.fillCircle(35, 25, 9, SSD1306_WHITE);
+        display.fillCircle(93, 25, 14, SSD1306_WHITE);
+        display.fillCircle(93, 25, 12, SSD1306_BLACK);
+        display.fillCircle(93, 25, 9, SSD1306_WHITE);
+        // Big smile
+        display.fillCircle(64, 42, 18, SSD1306_WHITE);
+        display.fillRect(10, 5, 108, 32, SSD1306_BLACK);
+        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+        display.display();
+        delay(150);
+    }
+}
+
+void displayFaceScared() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Wide open eyes (shocked look)
+    display.fillCircle(35, 22, 14, SSD1306_WHITE);
+    display.fillCircle(35, 22, 12, SSD1306_BLACK);
+    display.fillCircle(35, 22, 6, SSD1306_WHITE);
+    display.fillCircle(93, 22, 14, SSD1306_WHITE);
+    display.fillCircle(93, 22, 12, SSD1306_BLACK);
+    display.fillCircle(93, 22, 6, SSD1306_WHITE);
+    // Small O mouth
+    display.fillCircle(64, 46, 6, SSD1306_WHITE);
+    display.fillCircle(64, 46, 4, SSD1306_BLACK);
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceShock() {
+    // Animated shock
+    for (int i = 0; i < 3; i++) {
+        display.clearDisplay();
+        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+        // Extremely wide eyes
+        display.fillCircle(35, 22, 15, SSD1306_WHITE);
+        display.fillCircle(35, 22, 13, SSD1306_BLACK);
+        display.fillCircle(35, 22, 3, SSD1306_WHITE);
+        display.fillCircle(93, 22, 15, SSD1306_WHITE);
+        display.fillCircle(93, 22, 13, SSD1306_BLACK);
+        display.fillCircle(93, 22, 3, SSD1306_WHITE);
+        // Large O mouth
+        display.fillCircle(64, 46, 10, SSD1306_WHITE);
+        display.fillCircle(64, 46, 8, SSD1306_BLACK);
+        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+        display.display();
+        delay(100);
+    }
+}
+
+void displayFaceAngry() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Angry eyebrows (angled lines above eyes)
+    display.drawLine(25, 15, 42, 20, SSD1306_WHITE);
+    display.drawLine(25, 14, 42, 19, SSD1306_WHITE);
+    display.drawLine(86, 20, 103, 15, SSD1306_WHITE);
+    display.drawLine(86, 19, 103, 14, SSD1306_WHITE);
+    // Narrow eyes
+    display.fillCircle(35, 25, 12, SSD1306_WHITE);
+    display.fillCircle(35, 25, 10, SSD1306_BLACK);
+    display.fillCircle(35, 25, 5, SSD1306_WHITE);
+    display.fillCircle(93, 25, 12, SSD1306_WHITE);
+    display.fillCircle(93, 25, 10, SSD1306_BLACK);
+    display.fillCircle(93, 25, 5, SSD1306_WHITE);
+    // Straight line mouth
+    display.drawLine(48, 48, 80, 48, SSD1306_WHITE);
+    display.drawLine(48, 49, 80, 49, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceRomantic() {
+    // Heart eyes animation
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Left heart
+    display.fillTriangle(30, 25, 35, 20, 40, 25, SSD1306_WHITE);
+    display.fillTriangle(30, 25, 35, 30, 40, 25, SSD1306_WHITE);
+    // Right heart
+    display.fillTriangle(88, 25, 93, 20, 98, 25, SSD1306_WHITE);
+    display.fillTriangle(88, 25, 93, 30, 98, 25, SSD1306_WHITE);
+    // Smile
+    display.drawCircle(64, 38, 12, SSD1306_WHITE);
+    display.fillRect(10, 5, 108, 32, SSD1306_BLACK);
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceCold() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Shivering eyes
+    display.fillCircle(33, 25, 11, SSD1306_WHITE);
+    display.fillCircle(33, 25, 9, SSD1306_BLACK);
+    display.fillCircle(33, 25, 5, SSD1306_WHITE);
+    display.fillCircle(95, 25, 11, SSD1306_WHITE);
+    display.fillCircle(95, 25, 9, SSD1306_BLACK);
+    display.fillCircle(95, 25, 5, SSD1306_WHITE);
+    // Wavy mouth (cold)
+    for (int x = 50; x < 78; x += 4) {
+        display.drawPixel(x, 46 + (x % 8 < 4 ? 0 : 2), SSD1306_WHITE);
+    }
+    // Snowflakes
+    display.drawPixel(15, 12, SSD1306_WHITE);
+    display.drawPixel(110, 18, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceHot() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Tired droopy eyes
+    display.fillCircle(35, 27, 12, SSD1306_WHITE);
+    display.fillCircle(35, 27, 10, SSD1306_BLACK);
+    display.fillCircle(35, 28, 4, SSD1306_WHITE);
+    display.fillCircle(93, 27, 12, SSD1306_WHITE);
+    display.fillCircle(93, 27, 10, SSD1306_BLACK);
+    display.fillCircle(93, 28, 4, SSD1306_WHITE);
+    // Panting mouth (open)
+    display.drawLine(56, 46, 72, 46, SSD1306_WHITE);
+    display.drawLine(58, 48, 70, 48, SSD1306_WHITE);
+    // Sweat drops
+    display.fillCircle(20, 22, 2, SSD1306_WHITE);
+    display.fillCircle(108, 26, 2, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceSerious() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Focused eyes (medium pupils, straight)
+    display.fillCircle(35, 25, 12, SSD1306_WHITE);
+    display.fillCircle(35, 25, 10, SSD1306_BLACK);
+    display.fillCircle(35, 25, 5, SSD1306_WHITE);
+    display.fillCircle(93, 25, 12, SSD1306_WHITE);
+    display.fillCircle(93, 25, 10, SSD1306_BLACK);
+    display.fillCircle(93, 25, 5, SSD1306_WHITE);
+    // Straight mouth
+    display.drawLine(52, 46, 76, 46, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceConfused() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // One eyebrow raised
+    display.drawLine(25, 18, 42, 18, SSD1306_WHITE);
+    display.drawLine(86, 15, 103, 18, SSD1306_WHITE);
+    // Eyes looking different directions
+    display.fillCircle(35, 25, 12, SSD1306_WHITE);
+    display.fillCircle(35, 25, 10, SSD1306_BLACK);
+    display.fillCircle(32, 25, 5, SSD1306_WHITE);
+    display.fillCircle(93, 25, 12, SSD1306_WHITE);
+    display.fillCircle(93, 25, 10, SSD1306_BLACK);
+    display.fillCircle(96, 25, 5, SSD1306_WHITE);
+    // Question mark
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(110, 10);
+    display.print("?");
+    // Wavy mouth
+    display.drawLine(52, 46, 56, 48, SSD1306_WHITE);
+    display.drawLine(56, 48, 64, 46, SSD1306_WHITE);
+    display.drawLine(64, 46, 72, 48, SSD1306_WHITE);
+    display.display();
+}
+
+void displayFaceCurious() {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+    // Wide eyes looking up
+    display.fillCircle(35, 24, 13, SSD1306_WHITE);
+    display.fillCircle(35, 24, 11, SSD1306_BLACK);
+    display.fillCircle(35, 21, 6, SSD1306_WHITE);
+    display.fillCircle(93, 24, 13, SSD1306_WHITE);
+    display.fillCircle(93, 24, 11, SSD1306_BLACK);
+    display.fillCircle(93, 21, 6, SSD1306_WHITE);
+    // Small O mouth
+    display.fillCircle(64, 46, 5, SSD1306_WHITE);
+    display.fillCircle(64, 46, 3, SSD1306_BLACK);
+    display.display();
+}
+
+// ============== Emotion Control Helper ==============
+void displayEmotionFace(Emotion emotion) {
+    switch (emotion) {
+        case EMOTION_HAPPY: displayFaceHappy(); break;
+        case EMOTION_SAD: displayFaceSad(); break;
+        case EMOTION_EXCITED: displayFaceExcited(); break;
+        case EMOTION_SCARED: displayFaceScared(); break;
+        case EMOTION_SHOCK: displayFaceShock(); break;
+        case EMOTION_ANGRY: displayFaceAngry(); break;
+        case EMOTION_ROMANTIC: displayFaceRomantic(); break;
+        case EMOTION_COLD: displayFaceCold(); break;
+        case EMOTION_HOT: displayFaceHot(); break;
+        case EMOTION_SERIOUS: displayFaceSerious(); break;
+        case EMOTION_CONFUSED: displayFaceConfused(); break;
+        case EMOTION_CURIOUS: displayFaceCurious(); break;
+        case EMOTION_SLEEPY: displayFaceSleeping(); break;
+        default: displayFaceNormal(); break;
+    }
+}
+
+Emotion parseEmotionString(String emotion) {
+    emotion.toLowerCase();
+    if (emotion == "happy") return EMOTION_HAPPY;
+    else if (emotion == "sad") return EMOTION_SAD;
+    else if (emotion == "excited") return EMOTION_EXCITED;
+    else if (emotion == "scared") return EMOTION_SCARED;
+    else if (emotion == "shock") return EMOTION_SHOCK;
+    else if (emotion == "angry") return EMOTION_ANGRY;
+    else if (emotion == "romantic") return EMOTION_ROMANTIC;
+    else if (emotion == "cold") return EMOTION_COLD;
+    else if (emotion == "hot") return EMOTION_HOT;
+    else if (emotion == "serious") return EMOTION_SERIOUS;
+    else if (emotion == "confused") return EMOTION_CONFUSED;
+    else if (emotion == "curious") return EMOTION_CURIOUS;
+    else if (emotion == "sleepy") return EMOTION_SLEEPY;
+    else return EMOTION_NORMAL;
+}
+
+// ============== Speaking Face with Mouth Animation and Emotion ==============
+void displaySpeakingFace(Emotion emotion, int mouthPhase) {
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Draw eyes based on emotion
+    switch (emotion) {
+        case EMOTION_HAPPY:
+            // Large pupils (happy eyes)
+            display.fillCircle(35, 25, 12, SSD1306_WHITE);
+            display.fillCircle(35, 25, 10, SSD1306_BLACK);
+            display.fillCircle(35, 25, 7, SSD1306_WHITE);
+            display.fillCircle(93, 25, 12, SSD1306_WHITE);
+            display.fillCircle(93, 25, 10, SSD1306_BLACK);
+            display.fillCircle(93, 25, 7, SSD1306_WHITE);
+            break;
+        case EMOTION_SAD:
+            // Small pupils looking down
+            display.fillCircle(35, 27, 12, SSD1306_WHITE);
+            display.fillCircle(35, 27, 10, SSD1306_BLACK);
+            display.fillCircle(35, 30, 4, SSD1306_WHITE);
+            display.fillCircle(93, 27, 12, SSD1306_WHITE);
+            display.fillCircle(93, 27, 10, SSD1306_BLACK);
+            display.fillCircle(93, 30, 4, SSD1306_WHITE);
+            break;
+        case EMOTION_EXCITED:
+            // Wide eyes
+            display.fillCircle(35, 25, 14, SSD1306_WHITE);
+            display.fillCircle(35, 25, 12, SSD1306_BLACK);
+            display.fillCircle(35, 25, 9, SSD1306_WHITE);
+            display.fillCircle(93, 25, 14, SSD1306_WHITE);
+            display.fillCircle(93, 25, 12, SSD1306_BLACK);
+            display.fillCircle(93, 25, 9, SSD1306_WHITE);
+            break;
+        case EMOTION_ANGRY:
+            // Narrow eyes with eyebrows
+            display.drawLine(25, 15, 42, 20, SSD1306_WHITE);
+            display.drawLine(25, 14, 42, 19, SSD1306_WHITE);
+            display.drawLine(86, 20, 103, 15, SSD1306_WHITE);
+            display.drawLine(86, 19, 103, 14, SSD1306_WHITE);
+            display.fillCircle(35, 25, 12, SSD1306_WHITE);
+            display.fillCircle(35, 25, 10, SSD1306_BLACK);
+            display.fillCircle(35, 25, 5, SSD1306_WHITE);
+            display.fillCircle(93, 25, 12, SSD1306_WHITE);
+            display.fillCircle(93, 25, 10, SSD1306_BLACK);
+            display.fillCircle(93, 25, 5, SSD1306_WHITE);
+            break;
+        default:
+            // Normal eyes
+            display.fillCircle(35, 25, 12, SSD1306_WHITE);
+            display.fillCircle(35, 25, 10, SSD1306_BLACK);
+            display.fillCircle(35, 25, 6, SSD1306_WHITE);
+            display.fillCircle(93, 25, 12, SSD1306_WHITE);
+            display.fillCircle(93, 25, 10, SSD1306_BLACK);
+            display.fillCircle(93, 25, 6, SSD1306_WHITE);
+            break;
+    }
+
+    // Animated mouth (talking motion)
+    // mouthPhase: 0=closed, 1=half-open, 2=open, 3=half-open (cycles)
+    int mouthSize = 0;
+    if (mouthPhase == 1 || mouthPhase == 3) mouthSize = 4;  // Half open
+    else if (mouthPhase == 2) mouthSize = 8;  // Fully open
+
+    if (mouthSize > 0) {
+        display.fillCircle(64, 46, mouthSize, SSD1306_WHITE);
+        display.fillCircle(64, 46, mouthSize - 2, SSD1306_BLACK);
+    } else {
+        // Closed mouth (line)
+        display.drawLine(54, 46, 74, 46, SSD1306_WHITE);
+    }
 
     display.display();
 }
@@ -659,6 +997,18 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
             Serial.println("=================================\n");
         }
 
+        // Get emotion from backend LLM (X-Emotion header)
+        String emotionHeader = http.header("X-Emotion");
+        if (emotionHeader.length() > 0) {
+            currentEmotion = parseEmotionString(emotionHeader);
+            Serial.printf("[EMOTION] Backend sent emotion: %s\n", emotionHeader.c_str());
+            // Display emotion face briefly before speaking
+            displayEmotionFace(currentEmotion);
+            delay(500);
+        } else {
+            currentEmotion = EMOTION_NORMAL;  // Default if no emotion provided
+        }
+
         Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
 
         // ============================================
@@ -691,6 +1041,10 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
             unsigned long noDataCount = 0;
             unsigned long lastProgressPrint = 0;
 
+            // Mouth animation for speaking
+            int mouthPhase = 0;  // 0=closed, 1=half, 2=open, 3=half (cycles)
+            unsigned long lastMouthUpdate = millis();
+
             while (true) {
                 size_t available = stream->available();
 
@@ -706,6 +1060,13 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
                         totalStreamed += bytesRead;
                         noDataCount = 0; // Reset counter when data arrives
+
+                        // Animate mouth while speaking (update every 150ms)
+                        if (millis() - lastMouthUpdate > 150) {
+                            mouthPhase = (mouthPhase + 1) % 4;  // Cycle through 0,1,2,3
+                            displaySpeakingFace(currentEmotion, mouthPhase);
+                            lastMouthUpdate = millis();
+                        }
 
                         // Print progress every 2 seconds or when significant progress made
                         if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < bufferSize)) {
@@ -851,6 +1212,60 @@ void setup() {
 
     connectWiFi();
 
+    // ============== Setup OTA (Over-The-Air Updates) ==============
+    ArduinoOTA.setHostname("NOVA-AI");
+    ArduinoOTA.setPassword("nova2025");  // Optional: Set OTA password for security
+
+    ArduinoOTA.onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH) {
+            type = "firmware";
+        } else {
+            type = "filesystem";
+        }
+        Serial.println("\n[OTA] Update started: " + type);
+        displayMessage("OTA Update", "Uploading...");
+        setLedColor(0, 0, 255);  // Blue for OTA
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] Update complete!");
+        displayMessage("OTA Success", "Rebooting...");
+        setLedColor(0, 255, 0);  // Green
+        delay(1000);
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static unsigned long lastUpdate = 0;
+        if (millis() - lastUpdate > 1000) {  // Update every second
+            int percent = (progress / (total / 100));
+            Serial.printf("[OTA] Progress: %u%%\n", percent);
+            static char percentStr[16];
+            snprintf(percentStr, sizeof(percentStr), "%d%%", percent);
+            displayMessage("OTA Update", percentStr);
+            lastUpdate = millis();
+        }
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("\n[OTA] Error[%u]: ", error);
+        const char* errorMsg;
+        if (error == OTA_AUTH_ERROR) errorMsg = "Auth Failed";
+        else if (error == OTA_BEGIN_ERROR) errorMsg = "Begin Failed";
+        else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
+        else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
+        else if (error == OTA_END_ERROR) errorMsg = "End Failed";
+        else errorMsg = "Unknown Error";
+        Serial.println(errorMsg);
+        displayMessage("OTA Error", errorMsg);
+        setLedColor(255, 0, 0);  // Red
+        delay(2000);
+    });
+
+    ArduinoOTA.begin();
+    Serial.println("[OTA] Wireless updates enabled");
+    Serial.println("[OTA] Hostname: NOVA-AI");
+
     // Init LED
     pixels.begin();
     pixels.setBrightness(30); // Low brightness
@@ -876,13 +1291,47 @@ void setup() {
 
 // ============== Loop ==============
 void loop() {
-    // Check for Mute Button (GPIO 0)
+    // Handle OTA updates
+    ArduinoOTA.handle();
+
+    // Check for Mute Button (GPIO 4) with Long-Press Power Off
+    bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
+
+    // Detect button press start
+    if (buttonPressed && !buttonWasPressed) {
+        buttonPressStart = millis();
+        buttonWasPressed = true;
+    }
+
+    // Check for long press (3 seconds) - Power Off
+    if (buttonPressed && buttonWasPressed) {
+        unsigned long pressDuration = millis() - buttonPressStart;
+
+        // Long press detected - enter deep sleep
+        if (pressDuration >= LONG_PRESS_TIME) {
+            Serial.println("\n[POWER] Long press detected - Shutting down...");
+            displayMessage("Power Off", "Good Night!");
+            setLedColor(255, 0, 0); // Red
+            delay(1500);
+            setLedColor(0, 0, 0); // Off
+            display.clearDisplay();
+            display.display();
+
+            // Enter deep sleep (ultra-low power mode)
+            esp_deep_sleep_start();
+        }
+    }
+
+    // Detect button release - Toggle Mute (short press)
     static unsigned long lastBtnTime = 0;
-    if (digitalRead(BUTTON_PIN) == LOW) {
-        if (millis() - lastBtnTime > 500) { // 500ms debounce
+    if (!buttonPressed && buttonWasPressed) {
+        unsigned long pressDuration = millis() - buttonPressStart;
+
+        // Short press (< 3 seconds) - Toggle Mute
+        if (pressDuration < LONG_PRESS_TIME && millis() - lastBtnTime > 500) {
             isMuted = !isMuted;
             lastBtnTime = millis();
-            
+
             Serial.printf("[SYSTEM] %s\n", isMuted ? "MUTED (Silent Mode)" : "UNMUTED (Listening)");
 
             // Audio Feedback
@@ -900,6 +1349,8 @@ void loop() {
                 soundUnmute(); // Ascending tone - becoming active
             }
         }
+
+        buttonWasPressed = false;
     }
 
     // Check for serial command
