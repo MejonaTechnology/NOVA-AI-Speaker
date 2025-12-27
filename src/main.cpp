@@ -1194,10 +1194,18 @@ void startListening() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    
+
     Serial.println("\n========================================");
     Serial.println("       NOVA AI Voice Assistant");
     Serial.println("========================================\n");
+
+    // Check wake-up reason
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+        Serial.println("[POWER] Woke up from button press!");
+    } else if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
+        Serial.println("[POWER] Power-on reset or first boot");
+    }
     
     setupMicrophone();
 
@@ -1316,6 +1324,15 @@ void loop() {
             setLedColor(0, 0, 0); // Off
             display.clearDisplay();
             display.display();
+
+            // Configure wake-up source: Button press to wake up
+            // GPIO 4 is INPUT_PULLUP, so it's HIGH when not pressed
+            // Wake when button is pressed (LOW)
+            esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0); // 0 = wake on LOW (button pressed)
+
+            Serial.println("[POWER] Wake-up enabled on button press");
+            Serial.println("[POWER] Entering deep sleep...");
+            delay(100);
 
             // Enter deep sleep (ultra-low power mode)
             esp_deep_sleep_start();
