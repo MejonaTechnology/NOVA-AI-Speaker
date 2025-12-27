@@ -29,6 +29,11 @@ static bool micReady = false;
 // Audio buffers for wake word
 static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
 
+// Animation state
+unsigned long lastBlinkTime = 0;
+unsigned long lastBreathTime = 0;
+int breathPhase = 0;  // 0-10 for breathing animation
+
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -313,6 +318,65 @@ void displayFaceHappy() {
     display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);  // Redraw face
 
     display.display();
+}
+
+// ============== Animated Idle Face (Always Active) ==============
+void displayFaceIdleAnimated() {
+    // Breathing animation - subtle pupil size changes
+    int pupilSize = 5 + (breathPhase / 2);  // Pupil size varies from 5 to 10
+
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Left eye
+    display.fillCircle(35, 25, 12, SSD1306_WHITE);
+    display.fillCircle(35, 25, 10, SSD1306_BLACK);
+    display.fillCircle(35, 25, pupilSize, SSD1306_WHITE);
+
+    // Right eye
+    display.fillCircle(93, 25, 12, SSD1306_WHITE);
+    display.fillCircle(93, 25, 10, SSD1306_BLACK);
+    display.fillCircle(93, 25, pupilSize, SSD1306_WHITE);
+
+    // Mouth
+    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
+
+    display.display();
+}
+
+void blinkAnimation() {
+    // Quick blink
+    display.clearDisplay();
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Closed eyes
+    display.drawLine(35 - 8, 25, 35 + 8, 25, SSD1306_WHITE);
+    display.drawLine(93 - 8, 25, 93 + 8, 25, SSD1306_WHITE);
+    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
+
+    display.display();
+    delay(100);
+
+    // Eyes open again
+    displayFaceIdleAnimated();
+}
+
+void updateIdleAnimation() {
+    unsigned long currentTime = millis();
+
+    // Blink every 3-5 seconds randomly
+    if (currentTime - lastBlinkTime > random(3000, 5000)) {
+        blinkAnimation();
+        lastBlinkTime = currentTime;
+    }
+
+    // Breathing animation - update every 200ms
+    if (currentTime - lastBreathTime > 200) {
+        breathPhase++;
+        if (breathPhase > 10) breathPhase = 0;
+        displayFaceIdleAnimated();
+        lastBreathTime = currentTime;
+    }
 }
 
 // ============== Sound Effects System ==============
@@ -755,7 +819,12 @@ void startListening() {
         free(audioData);
     }
 
-    displayFaceNormal();  // Back to normal face
+    // Reset animation timers and return to idle animation
+    lastBlinkTime = millis();
+    lastBreathTime = millis();
+    breathPhase = 0;
+    displayFaceIdleAnimated();  // Back to animated idle face
+
     Serial.println("================================\n");
     consecutiveWakeDetections = 0;  // Reset wake word counter
 }
@@ -794,7 +863,13 @@ void setup() {
 
     displayFaceHappy();  // Show happy face
     delay(1500);
-    displayFaceNormal();  // Show normal idle face
+
+    // Initialize animation timers
+    lastBlinkTime = millis();
+    lastBreathTime = millis();
+    breathPhase = 0;
+
+    displayFaceIdleAnimated();  // Start with animated idle face
 
     Serial.println("\n[READY] Say 'Hey Nova' or type 'l'\n");
 }
@@ -817,7 +892,11 @@ void loop() {
                 soundMute(); // Descending tone - going quiet
             } else {
                 setLedColor(0, 0, 0); // Off
-                displayFaceNormal();  // Show normal face
+                // Reset animation and show animated idle face
+                lastBlinkTime = millis();
+                lastBreathTime = millis();
+                breathPhase = 0;
+                displayFaceIdleAnimated();
                 soundUnmute(); // Ascending tone - becoming active
             }
         }
@@ -829,6 +908,11 @@ void loop() {
         if (cmd == 'l' || cmd == 'L') {
             startListening();
         }
+    }
+
+    // Update idle animation when active (not muted)
+    if (!isRecording && !isPlaying && !isMuted) {
+        updateIdleAnimation();
     }
 
     // Wake word detection using continuous inference
