@@ -182,6 +182,139 @@ void displayStatus(const char* status) {
     display.display();
 }
 
+// ============== Animated Robot Face ==============
+void drawRobotFace(int leftEyeHeight, int rightEyeHeight, bool showPupils = true) {
+    display.clearDisplay();
+
+    // Face outline (rounded rectangle)
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Left eye
+    int leftEyeX = 35;
+    int leftEyeY = 25;
+    display.fillCircle(leftEyeX, leftEyeY, 12, SSD1306_WHITE);
+    display.fillCircle(leftEyeX, leftEyeY, 10, SSD1306_BLACK);
+    if (showPupils && leftEyeHeight > 0) {
+        display.fillCircle(leftEyeX, leftEyeY, leftEyeHeight, SSD1306_WHITE);
+    }
+
+    // Right eye
+    int rightEyeX = 93;
+    int rightEyeY = 25;
+    display.fillCircle(rightEyeX, rightEyeY, 12, SSD1306_WHITE);
+    display.fillCircle(rightEyeX, rightEyeY, 10, SSD1306_BLACK);
+    if (showPupils && rightEyeHeight > 0) {
+        display.fillCircle(rightEyeX, rightEyeY, rightEyeHeight, SSD1306_WHITE);
+    }
+
+    // Mouth (small line)
+    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
+
+    display.display();
+}
+
+void displayFaceNormal() {
+    drawRobotFace(6, 6, true);  // Normal sized pupils
+}
+
+void displayFaceListening() {
+    // Animated listening - wider eyes with larger pupils
+    for (int i = 0; i < 2; i++) {
+        drawRobotFace(8, 8, true);  // Larger pupils (alert)
+        delay(200);
+        drawRobotFace(6, 6, true);  // Normal pupils
+        delay(200);
+    }
+    drawRobotFace(8, 8, true);  // Stay alert
+}
+
+void displayFaceSleeping() {
+    display.clearDisplay();
+
+    // Face outline
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Closed eyes (horizontal lines)
+    int leftEyeX = 35;
+    int leftEyeY = 25;
+    int rightEyeX = 93;
+    int rightEyeY = 25;
+
+    // Left eye closed
+    display.drawLine(leftEyeX - 8, leftEyeY, leftEyeX + 8, leftEyeY, SSD1306_WHITE);
+    display.drawLine(leftEyeX - 6, leftEyeY - 1, leftEyeX + 6, leftEyeY - 1, SSD1306_WHITE);
+
+    // Right eye closed
+    display.drawLine(rightEyeX - 8, rightEyeY, rightEyeX + 8, rightEyeY, SSD1306_WHITE);
+    display.drawLine(rightEyeX - 6, rightEyeY - 1, rightEyeX + 6, rightEyeY - 1, SSD1306_WHITE);
+
+    // Sleepy mouth (small curve)
+    display.drawLine(52, 45, 76, 45, SSD1306_WHITE);
+
+    // "Zzz" sleep indicator
+    display.setTextSize(1);
+    display.setCursor(95, 10);
+    display.print("z");
+    display.setCursor(100, 5);
+    display.print("Z");
+
+    display.display();
+}
+
+void displayFaceProcessing() {
+    // Thinking animation - pupils move side to side
+    for (int i = 0; i < 2; i++) {
+        // Look left
+        display.clearDisplay();
+        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+        display.fillCircle(35, 25, 12, SSD1306_WHITE);
+        display.fillCircle(35, 25, 10, SSD1306_BLACK);
+        display.fillCircle(32, 25, 5, SSD1306_WHITE);  // Left pupil
+        display.fillCircle(93, 25, 12, SSD1306_WHITE);
+        display.fillCircle(93, 25, 10, SSD1306_BLACK);
+        display.fillCircle(90, 25, 5, SSD1306_WHITE);  // Left pupil
+        display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
+        display.display();
+        delay(250);
+
+        // Look right
+        display.clearDisplay();
+        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+        display.fillCircle(35, 25, 12, SSD1306_WHITE);
+        display.fillCircle(35, 25, 10, SSD1306_BLACK);
+        display.fillCircle(38, 25, 5, SSD1306_WHITE);  // Right pupil
+        display.fillCircle(93, 25, 12, SSD1306_WHITE);
+        display.fillCircle(93, 25, 10, SSD1306_BLACK);
+        display.fillCircle(96, 25, 5, SSD1306_WHITE);  // Right pupil
+        display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
+        display.display();
+        delay(250);
+    }
+}
+
+void displayFaceHappy() {
+    display.clearDisplay();
+
+    // Face outline
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
+
+    // Happy eyes (curved up)
+    display.fillCircle(35, 25, 12, SSD1306_WHITE);
+    display.fillCircle(35, 25, 10, SSD1306_BLACK);
+    display.fillCircle(35, 25, 7, SSD1306_WHITE);
+
+    display.fillCircle(93, 25, 12, SSD1306_WHITE);
+    display.fillCircle(93, 25, 10, SSD1306_BLACK);
+    display.fillCircle(93, 25, 7, SSD1306_WHITE);
+
+    // Smiling mouth (arc)
+    display.drawCircle(64, 35, 15, SSD1306_WHITE);
+    display.fillRect(10, 5, 108, 35, SSD1306_BLACK);  // Erase top half of circle
+    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);  // Redraw face
+
+    display.display();
+}
+
 // ============== Sound Effects System ==============
 // Alexa-style soothing sound effects for user feedback
 
@@ -278,7 +411,7 @@ void connectWiFi() {
         Serial.print("[WIFI] Connected! IP: ");
         Serial.println(WiFi.localIP());
 
-        displayMessage("NOVA AI", "WiFi Connected", WiFi.localIP().toString().c_str());
+        displayFaceHappy();  // Show happy face when connected
         delay(2000);
     } else {
         Serial.println("\n[WIFI] Connection failed!");
@@ -609,7 +742,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 void startListening() {
     Serial.println("\n========== LISTENING ==========");
     setLedColor(0, 255, 255); // Cyan (Alexa Listening)
-    displayStatus("Listening");
+    displayFaceListening();  // Animated listening face
     soundListening();  // High ping - attention sound
 
 
@@ -617,12 +750,12 @@ void startListening() {
     uint8_t* audioData = recordAudio(&bytesRecorded);
 
     if (audioData && bytesRecorded > 0) {
-        displayStatus("Processing");
+        displayFaceProcessing();  // Animated thinking face
         sendAndPlay(audioData, bytesRecorded);
         free(audioData);
     }
 
-    displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
+    displayFaceNormal();  // Back to normal face
     Serial.println("================================\n");
     consecutiveWakeDetections = 0;  // Reset wake word counter
 }
@@ -659,9 +792,9 @@ void setup() {
 
     setLedColor(0, 0, 0); // Off
 
-    displayStatus("READY");
-    delay(1000);
-    displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
+    displayFaceHappy();  // Show happy face
+    delay(1500);
+    displayFaceNormal();  // Show normal idle face
 
     Serial.println("\n[READY] Say 'Hey Nova' or type 'l'\n");
 }
@@ -680,11 +813,11 @@ void loop() {
             // Audio Feedback
             if (isMuted) {
                 setLedColor(255, 0, 0); // Red
-                displayStatus("MUTED");
+                displayFaceSleeping();  // Show sleeping face
                 soundMute(); // Descending tone - going quiet
             } else {
                 setLedColor(0, 0, 0); // Off
-                displayMessage("NOVA AI", "Say 'Hey Nova'", "", "Threshold: 0.95");
+                displayFaceNormal();  // Show normal face
                 soundUnmute(); // Ascending tone - becoming active
             }
         }
