@@ -10,10 +10,8 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-// ============== Wake Word Configuration ==============
-// ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.91f
-#define CONSECUTIVE_DETECTIONS 1
+#define WAKE_WORD_CONFIDENCE 0.85f  // Increased to reduce false positives
+#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -655,19 +653,26 @@ void loop() {
         EI_IMPULSE_ERROR eiErr = run_classifier_continuous(&signal, &result, false);
         
         if (eiErr == EI_IMPULSE_OK) {
-            // Check for wake word (index 1)
-            float wakeConf = result.classification[1].value;
-            
-            // DEBUG: Print ANY detection > 0.1 to see what the model is thinking
-            // if (wakeConf > 0.1) {
-            //      Serial.printf("[DEBUG] Confidence: %.2f\n", wakeConf);
+            // Check for wake word (index 0 = "Nova", index 1 = "noise", index 2 = "unknown")
+            float novaConf = result.classification[0].value;
+            float noiseConf = result.classification[1].value;
+            float unknownConf = result.classification[2].value;
+
+            // DEBUG: Print ALL classifications to see what the model detects
+            // for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+            //     Serial.printf("[DEBUG] %s: %.2f\n",
+            //         result.classification[i].label, result.classification[i].value);
             // }
 
-            if (wakeConf > WAKE_WORD_CONFIDENCE) {
+            // Only trigger if Nova confidence is high AND it's the dominant class
+            if (novaConf > WAKE_WORD_CONFIDENCE &&
+                novaConf > noiseConf &&
+                novaConf > unknownConf) {
                 consecutiveWakeDetections++;
-                Serial.printf("[WAKE] Detected: %.2f (%d/%d)\n", 
-                    wakeConf, consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
-                
+                Serial.printf("[WAKE] Nova: %.2f | Noise: %.2f | Unknown: %.2f (%d/%d)\n",
+                    novaConf, noiseConf, unknownConf,
+                    consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
+
                 if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
                     Serial.println("[WAKE] *** WAKE WORD CONFIRMED! ***");
                     startListening();
