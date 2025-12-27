@@ -10,7 +10,7 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.75f  // Confidence threshold for wake word (lower = more sensitive)
+#define WAKE_WORD_CONFIDENCE 0.90f  // Confidence threshold for wake word (higher = more accurate)
 #define CONSECUTIVE_DETECTIONS 1    // Require consecutive detections (1 = faster response)
 
 // ============== Button Configuration ==============
