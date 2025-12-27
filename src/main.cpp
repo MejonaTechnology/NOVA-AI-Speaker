@@ -10,8 +10,8 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.85f  // Increased to reduce false positives
-#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections
+#define WAKE_WORD_CONFIDENCE 0.85f  // Confidence threshold for wake word
+#define CONSECUTIVE_DETECTIONS 2    // Require consecutive detections
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -21,10 +21,10 @@ bool isMuted = false;
 bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
+static bool micReady = false;
 
 // Audio buffers for wake word
 static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
-static bool micReady = false;
 
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -552,7 +552,7 @@ void startListening() {
         sendAndPlay(audioData, bytesRecorded);
         free(audioData);
     }
-    
+
     Serial.println("================================\n");
     consecutiveWakeDetections = 0;  // Reset wake word counter
 }
@@ -614,32 +614,31 @@ void loop() {
         char cmd = Serial.read();
         if (cmd == 'l' || cmd == 'L') {
             startListening();
-            // Note: Don't return here, let loop continue
         }
     }
-    
+
     // Wake word detection using continuous inference
     if (!isRecording && !isPlaying && !isMuted) {
         // Read a slice of audio
         static int16_t audioBuffer[EI_CLASSIFIER_SLICE_SIZE];
         size_t bytesRead;
-        
-        esp_err_t err = i2s_read(MIC_I2S_NUM, audioBuffer, 
-            EI_CLASSIFIER_SLICE_SIZE * sizeof(int16_t), 
+
+        esp_err_t err = i2s_read(MIC_I2S_NUM, audioBuffer,
+            EI_CLASSIFIER_SLICE_SIZE * sizeof(int16_t),
             &bytesRead, portMAX_DELAY);
-        
+
         if (err != ESP_OK || bytesRead == 0) {
             return;
         }
 
         // Apply 5x Gain (Software amplification)
         for (int i = 0; i < bytesRead / 2; i++) {
-            int32_t sample = audioBuffer[i] * 5; 
+            int32_t sample = audioBuffer[i] * 5;
             if (sample > 32767) sample = 32767;
             if (sample < -32768) sample = -32768;
             audioBuffer[i] = (int16_t)sample;
         }
-        
+
         // Create signal from the audio buffer
         signal_t signal;
         signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
@@ -647,22 +646,16 @@ void loop() {
             numpy::int16_to_float(&audioBuffer[offset], out, length);
             return 0;
         };
-        
+
         // Run continuous classifier
         ei_impulse_result_t result = {0};
         EI_IMPULSE_ERROR eiErr = run_classifier_continuous(&signal, &result, false);
-        
+
         if (eiErr == EI_IMPULSE_OK) {
             // Check for wake word (index 0 = "Nova", index 1 = "noise", index 2 = "unknown")
             float novaConf = result.classification[0].value;
             float noiseConf = result.classification[1].value;
             float unknownConf = result.classification[2].value;
-
-            // DEBUG: Print ALL classifications to see what the model detects
-            // for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-            //     Serial.printf("[DEBUG] %s: %.2f\n",
-            //         result.classification[i].label, result.classification[i].value);
-            // }
 
             // Only trigger if Nova confidence is high AND it's the dominant class
             if (novaConf > WAKE_WORD_CONFIDENCE &&
@@ -682,6 +675,6 @@ void loop() {
             }
         }
     }
-    
+
     delay(10);
 }
