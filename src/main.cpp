@@ -1353,7 +1353,7 @@ void loop() {
 
             // Audio Feedback
             if (isMuted) {
-                setLedColor(255, 0, 0); // Red
+                setLedColor(0, 0, 0); // Off (save battery)
                 displayFaceSleeping();  // Show sleeping face
                 soundMute(); // Descending tone - going quiet
             } else {
