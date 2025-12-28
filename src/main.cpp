@@ -1233,8 +1233,16 @@ void setup() {
             type = "filesystem";
         }
         Serial.println("\n[OTA] Update started: " + type);
-        displayMessage("OTA Update", "Uploading...");
+
+        // CRITICAL: Stop I2S to free DMA and CPU cycles
+        i2s_driver_uninstall(MIC_I2S_NUM);
+        Serial.println("[OTA] I2S microphone stopped");
+
+        // Update LED only (fast GPIO, no I2C blocking)
         setLedColor(0, 0, 255);  // Blue for OTA
+
+        // DO NOT update OLED here - causes 50-150ms I2C blocking!
+        // OLED already shows "OTA MODE" from entering OTA mode
     });
 
     ArduinoOTA.onEnd([]() {
@@ -1249,9 +1257,11 @@ void setup() {
         if (millis() - lastUpdate > 1000) {  // Update every second
             int percent = (progress / (total / 100));
             Serial.printf("[OTA] Progress: %u%%\n", percent);
-            static char percentStr[16];
-            snprintf(percentStr, sizeof(percentStr), "%d%%", percent);
-            displayMessage("OTA Update", percentStr);
+
+            // DO NOT update OLED here - causes 50-150ms I2C blocking!
+            // This blocks OTA packet reception and causes timeouts
+            // Just use Serial output and LED for feedback
+
             lastUpdate = millis();
         }
     });
@@ -1379,11 +1389,16 @@ void loop() {
         } else if (cmd == 'o' || cmd == 'O') {
             // Enter OTA mode
             Serial.println("\n[OTA] Entering OTA mode...");
+
+            // CRITICAL: Stop I2S microphone to free DMA
+            i2s_driver_uninstall(MIC_I2S_NUM);
+            Serial.println("[OTA] I2S microphone stopped (frees DMA channels)");
+
             Serial.println("[OTA] All tasks paused, ready for wireless update");
             Serial.println("[OTA] Send 'x' to exit OTA mode");
             otaMode = true;
 
-            // Show OTA mode on OLED
+            // Show OTA mode on OLED (ONE TIME ONLY, before OTA starts)
             display.clearDisplay();
             display.setTextSize(2);
             display.setTextColor(SSD1306_WHITE);
