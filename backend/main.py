@@ -227,6 +227,41 @@ async def startup_event():
     print("[STARTUP] Weather monitoring started (updates every 5 minutes)")
 
 
+def extract_expression(text: str):
+    """
+    Extract dominant facial expression from AI response for ESP32 OLED display.
+    Returns expression code (0-6):
+    0 = neutral/idle, 1 = happy, 2 = thinking, 3 = excited,
+    4 = sad, 5 = smiling, 6 = surprised/gasp
+    """
+    # Count expression occurrences (prioritize emotional ones)
+    expressions = {
+        'happy': 1,
+        'excited': 3,
+        'sad': 4,
+        'think': 2,
+        'smiling': 5,
+        'gasp': 6,
+        'whisper': 5  # Treat whisper as smiling
+    }
+
+    # Count occurrences of each expression in text
+    expression_counts = {}
+    for expr, code in expressions.items():
+        count = text.lower().count(f'<{expr}>')
+        if count > 0:
+            expression_counts[code] = expression_counts.get(code, 0) + count
+
+    # Return most frequent expression, or neutral if none found
+    if expression_counts:
+        dominant_expr = max(expression_counts, key=expression_counts.get)
+        print(f"[EXPRESSION] Detected: {dominant_expr} ({list(expressions.keys())[list(expressions.values()).index(dominant_expr)]})")
+        return dominant_expr
+    else:
+        print("[EXPRESSION] No expression detected, using neutral")
+        return 0  # Neutral/idle
+
+
 def process_light_commands(text: str):
     """Process and execute light control commands from AI response"""
     # Detect and execute light commands
@@ -471,6 +506,9 @@ async def process_voice(request: Request):
     # 2.5. Process smart home commands (if any) and clean text for TTS
     ai_text = process_light_commands(ai_text)
 
+    # 2.6. Extract facial expression for ESP32 OLED display
+    expression_code = extract_expression(ai_text)
+
     # 3. Text-to-Speech with smart chunking (handles long responses)
     print(f"[TTS] Generating speech for {len(ai_text)} character response...")
 
@@ -501,6 +539,7 @@ async def process_voice(request: Request):
                 "X-Audio-Bits": "16",
                 "X-Transcription": quote(user_text, safe=''),  # URL-encode STT transcription
                 "X-AI-Response": quote(ai_text[:200], safe=''),  # URL-encode to handle Devanagari/Hindi chars
+                "X-Expression": str(expression_code),  # Facial expression code (0-6)
                 "Content-Length": str(len(pcm_bytes))
             }
         )

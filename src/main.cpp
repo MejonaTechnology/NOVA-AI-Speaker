@@ -14,8 +14,8 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.95f  // Confidence threshold for wake word (higher = more accurate, fewer false positives)
-#define CONSECUTIVE_DETECTIONS 1    // Require consecutive detections (1 = faster response)
+#define WAKE_WORD_CONFIDENCE 0.97f  // Confidence threshold for wake word (higher = more accurate, fewer false positives)
+#define CONSECUTIVE_DETECTIONS 2    // Require consecutive detections (2-3 = fewer false positives)
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -800,24 +800,46 @@ void connectWiFi() {
 
     displayMessage("NOVA AI", "Connecting WiFi...");
 
+    // Try primary WiFi
+    Serial.printf("[WIFI] Trying primary: %s\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
         Serial.print(".");
         attempts++;
     }
 
+    // If primary fails, try backup WiFi
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("\n[WIFI] Primary failed, trying backup...");
+        displayMessage("NOVA AI", "Trying backup WiFi...");
+
+        WiFi.disconnect();
+        delay(100);
+
+        Serial.printf("[WIFI] Trying backup: %s\n", WIFI_SSID_BACKUP);
+        WiFi.begin(WIFI_SSID_BACKUP, WIFI_PASSWORD_BACKUP);
+
+        attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            Serial.print(".");
+            attempts++;
+        }
+    }
+
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println();
-        Serial.print("[WIFI] Connected! IP: ");
+        Serial.printf("[WIFI] Connected to: %s\n", WiFi.SSID().c_str());
+        Serial.print("[WIFI] IP Address: ");
         Serial.println(WiFi.localIP());
 
         displayFaceHappy();  // Show happy face when connected
         delay(2000);
     } else {
-        Serial.println("\n[WIFI] Connection failed!");
+        Serial.println("\n[WIFI] Both networks failed!");
         displayMessage("NOVA AI", "WiFi Failed!");
         delay(2000);
     }
@@ -998,7 +1020,29 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
             Serial.println("=================================\n");
         }
 
-        // Get emotion from backend LLM (X-Emotion header)
+        // Get facial expression code from backend (0-6)
+        String expressionHeader = http.header("X-Expression");
+        if (expressionHeader.length() > 0) {
+            int expressionCode = expressionHeader.toInt();
+            Serial.printf("[EXPRESSION] Backend sent expression code: %d\n", expressionCode);
+
+            // Map expression code to emotion enum
+            // 0=neutral, 1=happy, 2=thinking, 3=excited, 4=sad, 5=smiling, 6=surprised
+            switch (expressionCode) {
+                case 1: currentEmotion = EMOTION_HAPPY; break;
+                case 2: currentEmotion = EMOTION_CURIOUS; break;  // thinking -> curious
+                case 3: currentEmotion = EMOTION_EXCITED; break;
+                case 4: currentEmotion = EMOTION_SAD; break;
+                case 5: currentEmotion = EMOTION_HAPPY; break;  // smiling -> happy
+                case 6: currentEmotion = EMOTION_SHOCK; break;  // surprised -> shock
+                default: currentEmotion = EMOTION_NORMAL; break;
+            }
+
+            // Display expression face before speaking
+            displayEmotionFace(currentEmotion);
+        }
+
+        // Get emotion from backend LLM (X-Emotion header) - fallback if no X-Expression
         String emotionHeader = http.header("X-Emotion");
         if (emotionHeader.length() > 0) {
             currentEmotion = parseEmotionString(emotionHeader);
@@ -1234,15 +1278,18 @@ void setup() {
         }
         Serial.println("\n[OTA] Update started: " + type);
 
-        // CRITICAL: Stop I2S to free DMA and CPU cycles
+        // CRITICAL: Stop ALL I2S to free DMA and CPU cycles
         i2s_driver_uninstall(MIC_I2S_NUM);
         Serial.println("[OTA] I2S microphone stopped");
+        i2s_driver_uninstall(SPK_I2S_NUM);
+        Serial.println("[OTA] I2S speaker stopped");
 
-        // Update LED only (fast GPIO, no I2C blocking)
-        setLedColor(0, 0, 255);  // Blue for OTA
+        // Turn OFF LED - no distractions during OTA
+        setLedColor(0, 0, 0);
+        Serial.println("[OTA] LED off");
 
-        // DO NOT update OLED here - causes 50-150ms I2C blocking!
-        // OLED already shows "OTA MODE" from entering OTA mode
+        // NO OLED updates - causes 50-150ms I2C blocking!
+        // NO LED updates after this point - maximizes OTA performance
     });
 
     ArduinoOTA.onEnd([]() {
@@ -1281,9 +1328,11 @@ void setup() {
         delay(2000);
     });
 
+    // ArduinoOTA.setPort(8266);  // Test with default port 3232 first
     ArduinoOTA.begin();
     Serial.println("[OTA] Wireless updates enabled");
     Serial.println("[OTA] Hostname: NOVA-AI");
+    Serial.println("[OTA] Port: 3232 (default)");
 
     // Init LED
     pixels.begin();
@@ -1387,32 +1436,27 @@ void loop() {
         if (cmd == 'l' || cmd == 'L') {
             startListening();
         } else if (cmd == 'o' || cmd == 'O') {
-            // Enter OTA mode
-            Serial.println("\n[OTA] Entering OTA mode...");
+            // Enter OTA mode - KILL ALL PROCESSES FOR MAXIMUM OTA SUCCESS
+            Serial.println("\n[OTA] Entering OTA mode - stopping all processes...");
 
-            // CRITICAL: Stop I2S microphone to free DMA
+            // CRITICAL: Stop ALL I2S to free DMA channels and CPU
             i2s_driver_uninstall(MIC_I2S_NUM);
-            Serial.println("[OTA] I2S microphone stopped (frees DMA channels)");
+            Serial.println("[OTA] I2S microphone stopped");
+            i2s_driver_uninstall(SPK_I2S_NUM);
+            Serial.println("[OTA] I2S speaker stopped");
 
-            Serial.println("[OTA] All tasks paused, ready for wireless update");
+            // Turn OFF LED to save power and reduce interference
+            setLedColor(0, 0, 0);
+            Serial.println("[OTA] LED turned off");
+
+            // Clear and turn OFF OLED display - no more I2C traffic!
+            display.clearDisplay();
+            display.display();  // Send clear to display
+            Serial.println("[OTA] OLED cleared and disabled");
+
+            Serial.println("[OTA] All peripherals stopped, ready for wireless update");
             Serial.println("[OTA] Send 'x' to exit OTA mode");
             otaMode = true;
-
-            // Show OTA mode on OLED (ONE TIME ONLY, before OTA starts)
-            display.clearDisplay();
-            display.setTextSize(2);
-            display.setTextColor(SSD1306_WHITE);
-            display.setCursor(10, 10);
-            display.println("OTA MODE");
-            display.setTextSize(1);
-            display.setCursor(5, 35);
-            display.println("Ready for Update");
-            display.setCursor(10, 50);
-            display.println("192.168.31.115");
-            display.display();
-
-            // Set LED to orange (OTA mode indicator)
-            setLedColor(255, 165, 0);
         } else if (cmd == 'x' || cmd == 'X') {
             // Exit OTA mode
             if (otaMode) {
