@@ -271,6 +271,20 @@ async def update_weather_periodically():
         await asyncio.sleep(300)  # 5 minutes = 300 seconds
 
 
+async def refresh_tuya_token_periodically():
+    """Background task to refresh Tuya token every 90 minutes (before 2-hour expiry)"""
+    while True:
+        await asyncio.sleep(90 * 60)  # 90 minutes = 5400 seconds
+        try:
+            print("[TUYA] Proactive token refresh...")
+            if light_controller.api.get_access_token():
+                print("[TUYA] Token refreshed successfully (proactive)")
+            else:
+                print("[TUYA] Token refresh failed (will retry in 90 min)")
+        except Exception as e:
+            print(f"[TUYA] Error refreshing token: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Run on application startup"""
@@ -279,6 +293,19 @@ async def startup_event():
     # Start background task for periodic weather updates
     asyncio.create_task(update_weather_periodically())
     print("[STARTUP] Weather monitoring started (updates every 5 minutes)")
+
+    # Initialize Tuya token on startup
+    try:
+        if light_controller.api.get_access_token():
+            print("[STARTUP] Tuya token initialized successfully")
+        else:
+            print("[STARTUP] Tuya token initialization failed")
+    except Exception as e:
+        print(f"[STARTUP] Error initializing Tuya token: {e}")
+
+    # Start background task for periodic Tuya token refresh
+    asyncio.create_task(refresh_tuya_token_periodically())
+    print("[STARTUP] Tuya token auto-refresh started (every 90 minutes)")
 
 
 def extract_expression(text: str):
