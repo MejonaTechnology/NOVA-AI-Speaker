@@ -89,8 +89,8 @@ class TuyaOpenAPI:
             print(f"[TUYA] HTTP Error: {response.status_code} - {response.text}")
             return False
 
-    def send_commands(self, device_id, commands):
-        """Send commands to a device"""
+    def send_commands(self, device_id, commands, retry=True):
+        """Send commands to a device with automatic token refresh on failure"""
         if not self.access_token or time.time() >= self.token_expiry:
             if not self.get_access_token():
                 print("[TUYA] Failed to get access token")
@@ -120,6 +120,17 @@ class TuyaOpenAPI:
                 print(f"[TUYA] Command sent successfully")
                 return True
             else:
+                # Check if token is invalid (error code 1010 or 1004)
+                error_code = result.get('code')
+                if retry and error_code in [1004, 1010]:
+                    print(f"[TUYA] Token invalid (code {error_code}), refreshing and retrying...")
+                    # Force token refresh
+                    self.access_token = None
+                    self.token_expiry = 0
+                    if self.get_access_token():
+                        # Retry the command once with new token
+                        return self.send_commands(device_id, commands, retry=False)
+
                 print(f"[TUYA] Command failed: {result}")
                 return False
         else:
