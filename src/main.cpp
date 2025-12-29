@@ -2,7 +2,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <ArduinoOTA.h>
+
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
@@ -29,7 +29,7 @@ bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
 static bool micReady = false;
-bool otaMode = false;  // OTA update mode flag
+
 
 // ============== Emotion Control ==============
 enum Emotion {
@@ -160,6 +160,7 @@ void setupSpeaker() {
 // ============== OLED Display Functions ==============
 void setupOLED() {
     Wire.begin(OLED_SDA, OLED_SCL);
+    Wire.setClock(400000); // Fast I2C (400kHz) for smoother animations
 
     if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
         Serial.println("[OLED] Initialization failed!");
@@ -836,6 +837,31 @@ void connectWiFi() {
         Serial.print("[WIFI] IP Address: ");
         Serial.println(WiFi.localIP());
 
+        // CRITICAL: Disable WiFi Power Save to prevent high latency/jitter
+        WiFi.setSleep(false);
+        Serial.println("[WIFI] Power Save Mode: DISABLED (High Performance)");
+
+        // Set maximum WiFi TX power for better signal strength (reduces lag)
+        WiFi.setTxPower(WIFI_POWER_19_5dBm); // Maximum power (19.5dBm)
+        Serial.println("[WIFI] TX Power: MAXIMUM (19.5 dBm) - Reduces lag");
+
+        // Print WiFi diagnostics for troubleshooting
+        int rssi = WiFi.RSSI();
+        Serial.printf("[WIFI] Signal Strength (RSSI): %d dBm\n", rssi);
+        Serial.printf("[WIFI] Channel: %d\n", WiFi.channel());
+
+        // Warn user about signal quality
+        if (rssi > -50) {
+            Serial.println("[WIFI] Signal Quality: EXCELLENT");
+        } else if (rssi > -60) {
+            Serial.println("[WIFI] Signal Quality: GOOD");
+        } else if (rssi > -70) {
+            Serial.println("[WIFI] Signal Quality: FAIR - May cause audio lag");
+        } else {
+            Serial.println("[WIFI] Signal Quality: WEAK - WILL cause audio lag!");
+            Serial.println("[WIFI] >>> Move ESP32 closer to WiFi router <<<");
+        }
+
         displayFaceHappy();  // Show happy face when connected
         delay(2000);
     } else {
@@ -1102,6 +1128,7 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                     lastDataTime = millis();
                     int bytesRead = stream->readBytes(buffer, min(bufferSize, available));
                     if (bytesRead > 0) {
+                        // Maximize transfer to I2S DMA in one go
                         i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
                         totalStreamed += bytesRead;
                         noDataCount = 0; // Reset counter when data arrives
@@ -1185,7 +1212,8 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                             }
                         }
                     }
-                    delay(10);
+                    // Only small delay if NO data, to prevent spinning too fast
+                    delay(1); 
                 }
             }
 
@@ -1265,74 +1293,7 @@ void setup() {
 
     connectWiFi();
 
-    // ============== Setup OTA (Over-The-Air Updates) ==============
-    ArduinoOTA.setHostname("NOVA-AI");
-    ArduinoOTA.setPassword("nova2025");  // Optional: Set OTA password for security
 
-    ArduinoOTA.onStart([]() {
-        String type;
-        if (ArduinoOTA.getCommand() == U_FLASH) {
-            type = "firmware";
-        } else {
-            type = "filesystem";
-        }
-        Serial.println("\n[OTA] Update started: " + type);
-
-        // CRITICAL: Stop ALL I2S to free DMA and CPU cycles
-        i2s_driver_uninstall(MIC_I2S_NUM);
-        Serial.println("[OTA] I2S microphone stopped");
-        i2s_driver_uninstall(SPK_I2S_NUM);
-        Serial.println("[OTA] I2S speaker stopped");
-
-        // Turn OFF LED - no distractions during OTA
-        setLedColor(0, 0, 0);
-        Serial.println("[OTA] LED off");
-
-        // NO OLED updates - causes 50-150ms I2C blocking!
-        // NO LED updates after this point - maximizes OTA performance
-    });
-
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\n[OTA] Update complete!");
-        displayMessage("OTA Success", "Rebooting...");
-        setLedColor(0, 255, 0);  // Green
-        delay(1000);
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        static unsigned long lastUpdate = 0;
-        if (millis() - lastUpdate > 1000) {  // Update every second
-            int percent = (progress / (total / 100));
-            Serial.printf("[OTA] Progress: %u%%\n", percent);
-
-            // DO NOT update OLED here - causes 50-150ms I2C blocking!
-            // This blocks OTA packet reception and causes timeouts
-            // Just use Serial output and LED for feedback
-
-            lastUpdate = millis();
-        }
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("\n[OTA] Error[%u]: ", error);
-        const char* errorMsg;
-        if (error == OTA_AUTH_ERROR) errorMsg = "Auth Failed";
-        else if (error == OTA_BEGIN_ERROR) errorMsg = "Begin Failed";
-        else if (error == OTA_CONNECT_ERROR) errorMsg = "Connect Failed";
-        else if (error == OTA_RECEIVE_ERROR) errorMsg = "Receive Failed";
-        else if (error == OTA_END_ERROR) errorMsg = "End Failed";
-        else errorMsg = "Unknown Error";
-        Serial.println(errorMsg);
-        displayMessage("OTA Error", errorMsg);
-        setLedColor(255, 0, 0);  // Red
-        delay(2000);
-    });
-
-    // ArduinoOTA.setPort(8266);  // Test with default port 3232 first
-    ArduinoOTA.begin();
-    Serial.println("[OTA] Wireless updates enabled");
-    Serial.println("[OTA] Hostname: NOVA-AI");
-    Serial.println("[OTA] Port: 3232 (default)");
 
     // Init LED
     pixels.begin();
@@ -1359,8 +1320,7 @@ void setup() {
 
 // ============== Loop ==============
 void loop() {
-    // Handle OTA updates
-    ArduinoOTA.handle();
+
 
     // Check for Mute Button (GPIO 4) with Long-Press Power Off
     bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
@@ -1435,49 +1395,11 @@ void loop() {
         char cmd = Serial.read();
         if (cmd == 'l' || cmd == 'L') {
             startListening();
-        } else if (cmd == 'o' || cmd == 'O') {
-            // Enter OTA mode - KILL ALL PROCESSES FOR MAXIMUM OTA SUCCESS
-            Serial.println("\n[OTA] Entering OTA mode - stopping all processes...");
-
-            // CRITICAL: Stop ALL I2S to free DMA channels and CPU
-            i2s_driver_uninstall(MIC_I2S_NUM);
-            Serial.println("[OTA] I2S microphone stopped");
-            i2s_driver_uninstall(SPK_I2S_NUM);
-            Serial.println("[OTA] I2S speaker stopped");
-
-            // Turn OFF LED to save power and reduce interference
-            setLedColor(0, 0, 0);
-            Serial.println("[OTA] LED turned off");
-
-            // Clear and turn OFF OLED display - no more I2C traffic!
-            display.clearDisplay();
-            display.display();  // Send clear to display
-            Serial.println("[OTA] OLED cleared and disabled");
-
-            Serial.println("[OTA] All peripherals stopped, ready for wireless update");
-            Serial.println("[OTA] Send 'x' to exit OTA mode");
-            otaMode = true;
-        } else if (cmd == 'x' || cmd == 'X') {
-            // Exit OTA mode
-            if (otaMode) {
-                Serial.println("[OTA] Exiting OTA mode...");
-                otaMode = false;
-                setLedColor(0, 0, 0);
-                if (!isMuted) {
-                    displayFaceIdleAnimated();
-                } else {
-                    displayFaceSleeping();
-                }
-            }
         }
     }
 
     // In OTA mode, skip all tasks except OTA handling
-    if (otaMode) {
-        // Only handle OTA updates in this mode
-        // ArduinoOTA.handle() is already called at the start of loop()
-        return;  // Skip all other processing
-    }
+
 
     // Update idle animation when active (not muted)
     if (!isRecording && !isPlaying && !isMuted) {
@@ -1543,5 +1465,6 @@ void loop() {
         }
     }
 
-    delay(10);
+    // delay(10); // Removed for speed optimization
+
 }
