@@ -600,13 +600,8 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
                 break;
             }
 
-            // Apply Gain to recording
-            for (int i = 0; i < bytesRead / 2; i++) {
-                int32_t sample = samples[i] * 3; // 3x Gain
-                if (sample > 32767) sample = 32767;
-                if (sample < -32768) sample = -32768;
-                samples[i] = (int16_t)sample;
-            }
+            // No gain applied - use natural microphone levels
+            // (Previously had 3x gain which was causing issues with silence detection)
 
             if ((totalBytes + bytesRead) <= RECORD_BUFFER_SIZE) {
                 memcpy(audioBuffer + totalBytes, tempBuffer, bytesRead);
@@ -747,38 +742,38 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
 
         // ============================================
-        // STREAMING MODE (Play as data arrives)
+        // OPTIMIZED STREAMING MODE (Play-and-Delete Architecture)
+        // - Chunks play immediately as they arrive
+        // - Each chunk is freed right after playback
+        // - Minimal memory footprint for long responses
         // ============================================
         {
-            Serial.println("[STREAM] Starting real-time playback...");
+            Serial.println("[STREAM] Starting real-time playback with auto-cleanup...");
             isPlaying = true;
             setLedColor(50, 0, 200); // Purple (Speaking)
 
-            const size_t bufferSize = 16384;
-            uint8_t* buffer = (uint8_t*)malloc(bufferSize);
+            // Small chunk size for faster response and immediate cleanup
+            const size_t chunkSize = 4096; // 4KB chunks (reduced from 16KB for faster turnaround)
+            uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
 
-            if (!buffer) {
-                Serial.println("[ERR] Buffer malloc failed!");
+            if (!audioChunk) {
+                Serial.println("[ERR] Chunk malloc failed!");
                 http.end();
                 return;
             }
 
             size_t bytesWritten;
-            unsigned long lastDataTime = millis();
             unsigned long streamStartTime = millis();
             bool receivedFirstByte = false;
             size_t totalStreamed = 0;
+            size_t chunksProcessed = 0;
             bool useContentLength = (contentLength > 0);
 
             Serial.println("[STREAM] Waiting for audio from backend...");
 
-            // Streaming Loop - Play audio as it arrives
+            // Streaming Loop - Play-and-Delete each chunk
             unsigned long noDataCount = 0;
             unsigned long lastProgressPrint = 0;
-
-            // Mouth animation for speaking
-            int mouthPhase = 0;  // 0=closed, 1=half, 2=open, 3=half (cycles)
-            unsigned long lastMouthUpdate = millis();
 
             while (true) {
                 size_t available = stream->available();
@@ -789,16 +784,22 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         receivedFirstByte = true;
                     }
 
-                    lastDataTime = millis();
-                    int bytesRead = stream->readBytes(buffer, min(bufferSize, available));
+                    // Read chunk from network stream
+                    int bytesRead = stream->readBytes(audioChunk, min(chunkSize, available));
                     if (bytesRead > 0) {
-                        // Maximize transfer to I2S DMA in one go
-                        i2s_write(SPK_I2S_NUM, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
+                        // Write chunk to I2S speaker (blocking until DMA accepts it)
+                        i2s_write(SPK_I2S_NUM, audioChunk, bytesRead, &bytesWritten, portMAX_DELAY);
+
+                        // CRITICAL: Clear chunk immediately after playback for next chunk
+                        // This frees up buffer space for incoming data
+                        memset(audioChunk, 0, bytesRead);
+
                         totalStreamed += bytesRead;
+                        chunksProcessed++;
                         noDataCount = 0; // Reset counter when data arrives
 
                         // Print progress every 2 seconds or when significant progress made
-                        if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < bufferSize)) {
+                        if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < chunkSize)) {
                             if (useContentLength) {
                                 Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
                                     totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
@@ -879,8 +880,8 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                 }
             }
 
-            Serial.printf("[STREAM] Total played: %d bytes\n", totalStreamed);
-            free(buffer);
+            Serial.printf("[STREAM] Total played: %d bytes in %d chunks\n", totalStreamed, chunksProcessed);
+            free(audioChunk); // Free the chunk buffer
 
             // IMPORTANT: Wait for I2S DMA to finish playing buffered audio
             // At 16kHz, 16-bit stereo (4 bytes/sample), DMA buffers can hold:
