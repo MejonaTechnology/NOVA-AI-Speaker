@@ -12,11 +12,11 @@
 
 // ============== Wake Word Configuration ==============
 // Optimized settings matching Edge Impulse browser portal (continuous inference mode)
-#define WAKE_WORD_CONFIDENCE 0.60f  // 60% threshold (EI_CLASSIFIER_THRESHOLD default)
-#define CONSECUTIVE_DETECTIONS 1    // Single detection (like Edge Impulse portal)
+#define WAKE_WORD_CONFIDENCE 0.75f  // 75% threshold (reduced false positives)
+#define CONSECUTIVE_DETECTIONS 1    // Single detection (responsive triggering)
 #define NOISE_GATE_THRESHOLD 100    // Minimum audio level to process (reduced false positives)
 #define WAKE_WORD_GAIN 8            // 8x gain to match Edge Impulse portal example
-#define CONFIDENCE_GAP 0.10f        // Nova score must be 10% higher than Noise/Unknown
+#define CONFIDENCE_GAP 0.20f        // Nova score must be 20% higher than Noise/Unknown (stricter)
 #define DEBUG_WAKE_WORD false       // Disable debug output for production use
 
 // ============== Button Configuration ==============
