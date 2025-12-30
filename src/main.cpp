@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include "esp_wifi.h"
 
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
@@ -351,6 +352,8 @@ void connectWiFi() {
         Serial.print("[WIFI] IP Address: ");
         Serial.println(WiFi.localIP());
 
+        // ========== ADVANCED WiFi OPTIMIZATIONS ==========
+
         // CRITICAL: Disable WiFi Power Save to prevent high latency/jitter
         WiFi.setSleep(false);
         Serial.println("[WIFI] Power Save Mode: DISABLED (High Performance)");
@@ -358,6 +361,18 @@ void connectWiFi() {
         // Set maximum WiFi TX power for better signal strength (reduces lag)
         WiFi.setTxPower(WIFI_POWER_19_5dBm); // Maximum power (19.5dBm)
         Serial.println("[WIFI] TX Power: MAXIMUM (19.5 dBm) - Reduces lag");
+
+        // Enable WiFi auto-reconnect (reduces disconnections)
+        WiFi.setAutoReconnect(true);
+        Serial.println("[WIFI] Auto-Reconnect: ENABLED");
+
+        // Set persistent WiFi mode (keeps connection stable across sleep/wake)
+        WiFi.persistent(false); // Disable flash writes for faster reconnection
+        Serial.println("[WIFI] Persistent Mode: DISABLED (Faster reconnect)");
+
+        // Configure TCP/IP stack for low latency
+        esp_wifi_set_ps(WIFI_PS_NONE); // Disable all power saving
+        Serial.println("[WIFI] Power Saving: NONE (Ultra Performance)");
 
         // Print WiFi diagnostics for troubleshooting
         int rssi = WiFi.RSSI();
