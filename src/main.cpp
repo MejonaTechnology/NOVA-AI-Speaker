@@ -5,17 +5,20 @@
 
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include "config.h"
 
 // Edge Impulse Wake Word
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-#define WAKE_WORD_CONFIDENCE 0.97f  // Confidence threshold for wake word (higher = more accurate, fewer false positives)
-#define CONSECUTIVE_DETECTIONS 2    // Require consecutive detections (2-3 = fewer false positives)
+// Optimized settings matching Edge Impulse browser portal
+#define WAKE_WORD_CONFIDENCE 0.60f  // 60% threshold (EI_CLASSIFIER_THRESHOLD default)
+#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections for reliability
+#define NOISE_GATE_THRESHOLD 100    // Minimum audio level to process (reduced false positives)
+#define WAKE_WORD_GAIN 3            // Moderate gain (3x) for natural audio levels
+#define CONFIDENCE_GAP 0.10f        // Nova score must be 10% higher than Noise/Unknown
+#define DEBUG_WAKE_WORD false       // Disable debug output for production use
+#define INFERENCE_INTERVAL_MS 500   // Run inference every 500ms (continuous detection)
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -29,6 +32,7 @@ bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
 static bool micReady = false;
+unsigned long lastInferenceTime = 0;  // Timing for continuous wake word detection
 
 
 // ============== Emotion Control ==============
@@ -53,16 +57,8 @@ Emotion currentEmotion = EMOTION_NORMAL;
 // Audio buffers for wake word
 static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
 
-// Animation state
-unsigned long lastBlinkTime = 0;
-unsigned long lastBreathTime = 0;
-int breathPhase = 0;  // 0-10 for breathing animation
-
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// ============== OLED Display Setup ==============
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 
 // ============== Helper Functions ==============
 int hexToDec(char c) {
@@ -100,6 +96,52 @@ void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
     pixels.show();
 }
 
+// ============== Audio Preprocessing Variables ==============
+static float dcOffsetFilter = 0.0f;
+static const float DC_FILTER_ALPHA = 0.95f; // High-pass filter coefficient
+
+// Simple low-pass filter for noise reduction
+static int16_t lastSample = 0;
+static const float LOWPASS_ALPHA = 0.85f; // INCREASED: Less aggressive filtering (0.0-1.0)
+
+// DC offset removal (high-pass filter)
+int16_t removeDCOffset(int16_t sample) {
+    dcOffsetFilter = DC_FILTER_ALPHA * dcOffsetFilter + (1.0f - DC_FILTER_ALPHA) * sample;
+    return sample - (int16_t)dcOffsetFilter;
+}
+
+// Low-pass filter to remove high-frequency noise (gentle)
+int16_t lowPassFilter(int16_t sample) {
+    lastSample = (int16_t)(LOWPASS_ALPHA * sample + (1.0f - LOWPASS_ALPHA) * lastSample);
+    return lastSample;
+}
+
+// Gentle noise reduction - applies minimal filtering
+int16_t reduceNoise(int16_t sample) {
+    // Step 1: Remove DC offset only
+    sample = removeDCOffset(sample);
+
+    // Step 2: Very gentle low-pass filter (optional, can be disabled)
+    // sample = lowPassFilter(sample);  // Commented out - too aggressive
+
+    // Step 3: Gentle noise gate - only suppress dead silence
+    if (abs(sample) < 10) {  // REDUCED: Lower threshold for noise floor
+        sample = 0;
+    }
+
+    return sample;
+}
+
+// Voice Activity Detection (VAD) - checks if audio has speech energy
+bool isVoiceActivity(int16_t* buffer, size_t samples) {
+    int32_t energy = 0;
+    for (size_t i = 0; i < samples; i++) {
+        energy += abs(buffer[i]);
+    }
+    int32_t avgEnergy = energy / samples;
+    return avgEnergy > NOISE_GATE_THRESHOLD;
+}
+
 // ============== I2S Microphone Setup (16kHz for wake word) ==============
 void setupMicrophone() {
     i2s_config_t i2s_config = {
@@ -109,9 +151,9 @@ void setupMicrophone() {
         .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 16,
+        .dma_buf_count = 24,   // Increased from 16 for more stable buffering
         .dma_buf_len = 1024,
-        .use_apll = false,
+        .use_apll = true,      // Enable APLL for more stable audio clock
         .tx_desc_auto_clear = false,
         .fixed_mclk = 0
     };
@@ -125,8 +167,14 @@ void setupMicrophone() {
 
     ESP_ERROR_CHECK(i2s_driver_install(MIC_I2S_NUM, &i2s_config, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(MIC_I2S_NUM, &pin_config));
+
+    // Clear DMA buffers to avoid initial noise
+    i2s_zero_dma_buffer(MIC_I2S_NUM);
+    delay(100);
+
     micReady = true;
-    Serial.println("[MIC] Microphone initialized (16kHz)");
+    Serial.println("[MIC] Enhanced microphone initialized (16kHz, APLL enabled)");
+    Serial.println("[MIC] Minimal processing: DC offset removal + Gentle noise gate");
 }
 
 // ============== I2S Speaker Setup (16kHz) ==============
@@ -138,9 +186,9 @@ void setupSpeaker() {
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 16, // Increase DMA buffers for stability
+        .dma_buf_count = 24,   // Increased from 16 for smoother playback
         .dma_buf_len = 1024,
-        .use_apll = false,
+        .use_apll = true,      // Enable APLL for better audio quality
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
     };
@@ -154,418 +202,12 @@ void setupSpeaker() {
 
     ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_NUM, &i2s_config, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_NUM, &pin_config));
-    Serial.println("[SPK] Speaker initialized (16kHz)");
+    Serial.println("[SPK] Enhanced speaker initialized (16kHz, APLL enabled)");
 }
 
-// ============== OLED Display Functions ==============
-void setupOLED() {
-    Wire.begin(OLED_SDA, OLED_SCL);
-    Wire.setClock(400000); // Fast I2C (400kHz) for smoother animations
+// ============== Display Functions Removed ==============
+// Pure audio speaker - no screen needed
 
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
-        Serial.println("[OLED] Initialization failed!");
-        return;
-    }
-
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("NOVA AI");
-    display.println("Initializing...");
-    display.display();
-    Serial.println("[OLED] Display initialized");
-}
-
-void displayMessage(const char* line1, const char* line2 = "", const char* line3 = "", const char* line4 = "") {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-
-    display.setCursor(0, 0);
-    display.println(line1);
-
-    if (strlen(line2) > 0) {
-        display.setCursor(0, 16);
-        display.println(line2);
-    }
-
-    if (strlen(line3) > 0) {
-        display.setCursor(0, 32);
-        display.println(line3);
-    }
-
-    if (strlen(line4) > 0) {
-        display.setCursor(0, 48);
-        display.println(line4);
-    }
-
-    display.display();
-}
-
-void displayStatus(const char* status) {
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 20);
-    display.println(status);
-    display.display();
-}
-
-// ============== Animated Robot Face ==============
-void drawRobotFace(int leftEyeHeight, int rightEyeHeight, bool showPupils = true) {
-    display.clearDisplay();
-
-    // Face outline (rounded rectangle)
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Left eye
-    int leftEyeX = 35;
-    int leftEyeY = 25;
-    display.fillCircle(leftEyeX, leftEyeY, 12, SSD1306_WHITE);
-    display.fillCircle(leftEyeX, leftEyeY, 10, SSD1306_BLACK);
-    if (showPupils && leftEyeHeight > 0) {
-        display.fillCircle(leftEyeX, leftEyeY, leftEyeHeight, SSD1306_WHITE);
-    }
-
-    // Right eye
-    int rightEyeX = 93;
-    int rightEyeY = 25;
-    display.fillCircle(rightEyeX, rightEyeY, 12, SSD1306_WHITE);
-    display.fillCircle(rightEyeX, rightEyeY, 10, SSD1306_BLACK);
-    if (showPupils && rightEyeHeight > 0) {
-        display.fillCircle(rightEyeX, rightEyeY, rightEyeHeight, SSD1306_WHITE);
-    }
-
-    // Mouth (small line)
-    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
-
-    display.display();
-}
-
-void displayFaceNormal() {
-    drawRobotFace(6, 6, true);  // Normal sized pupils
-}
-
-void displayFaceListening() {
-    // Animated listening - wider eyes with larger pupils
-    for (int i = 0; i < 2; i++) {
-        drawRobotFace(8, 8, true);  // Larger pupils (alert)
-        delay(200);
-        drawRobotFace(6, 6, true);  // Normal pupils
-        delay(200);
-    }
-    drawRobotFace(8, 8, true);  // Stay alert
-}
-
-void displayFaceSleeping() {
-    display.clearDisplay();
-
-    // Face outline
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Closed eyes (horizontal lines)
-    int leftEyeX = 35;
-    int leftEyeY = 25;
-    int rightEyeX = 93;
-    int rightEyeY = 25;
-
-    // Left eye closed
-    display.drawLine(leftEyeX - 8, leftEyeY, leftEyeX + 8, leftEyeY, SSD1306_WHITE);
-    display.drawLine(leftEyeX - 6, leftEyeY - 1, leftEyeX + 6, leftEyeY - 1, SSD1306_WHITE);
-
-    // Right eye closed
-    display.drawLine(rightEyeX - 8, rightEyeY, rightEyeX + 8, rightEyeY, SSD1306_WHITE);
-    display.drawLine(rightEyeX - 6, rightEyeY - 1, rightEyeX + 6, rightEyeY - 1, SSD1306_WHITE);
-
-    // Sleepy mouth (small curve)
-    display.drawLine(52, 45, 76, 45, SSD1306_WHITE);
-
-    // "Zzz" sleep indicator
-    display.setTextSize(1);
-    display.setCursor(95, 10);
-    display.print("z");
-    display.setCursor(100, 5);
-    display.print("Z");
-
-    display.display();
-}
-
-void displayFaceProcessing() {
-    // Thinking animation - pupils move side to side
-    for (int i = 0; i < 2; i++) {
-        // Look left
-        display.clearDisplay();
-        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-        display.fillCircle(35, 25, 12, SSD1306_WHITE);
-        display.fillCircle(35, 25, 10, SSD1306_BLACK);
-        display.fillCircle(32, 25, 5, SSD1306_WHITE);  // Left pupil
-        display.fillCircle(93, 25, 12, SSD1306_WHITE);
-        display.fillCircle(93, 25, 10, SSD1306_BLACK);
-        display.fillCircle(90, 25, 5, SSD1306_WHITE);  // Left pupil
-        display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
-        display.display();
-        delay(250);
-
-        // Look right
-        display.clearDisplay();
-        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-        display.fillCircle(35, 25, 12, SSD1306_WHITE);
-        display.fillCircle(35, 25, 10, SSD1306_BLACK);
-        display.fillCircle(38, 25, 5, SSD1306_WHITE);  // Right pupil
-        display.fillCircle(93, 25, 12, SSD1306_WHITE);
-        display.fillCircle(93, 25, 10, SSD1306_BLACK);
-        display.fillCircle(96, 25, 5, SSD1306_WHITE);  // Right pupil
-        display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
-        display.display();
-        delay(250);
-    }
-}
-
-void displayFaceHappy() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Happy eyes (large pupils)
-    display.fillCircle(35, 25, 12, SSD1306_WHITE);
-    display.fillCircle(35, 25, 10, SSD1306_BLACK);
-    display.fillCircle(35, 25, 7, SSD1306_WHITE);
-    display.fillCircle(93, 25, 12, SSD1306_WHITE);
-    display.fillCircle(93, 25, 10, SSD1306_BLACK);
-    display.fillCircle(93, 25, 7, SSD1306_WHITE);
-    // Smiling mouth
-    display.drawCircle(64, 35, 15, SSD1306_WHITE);
-    display.fillRect(10, 5, 108, 35, SSD1306_BLACK);
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceSad() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Sad eyes (small pupils, looking down)
-    display.fillCircle(35, 27, 12, SSD1306_WHITE);
-    display.fillCircle(35, 27, 10, SSD1306_BLACK);
-    display.fillCircle(35, 30, 4, SSD1306_WHITE);
-    display.fillCircle(93, 27, 12, SSD1306_WHITE);
-    display.fillCircle(93, 27, 10, SSD1306_BLACK);
-    display.fillCircle(93, 30, 4, SSD1306_WHITE);
-    // Frowning mouth
-    display.drawCircle(64, 52, 12, SSD1306_WHITE);
-    display.fillRect(10, 40, 108, 20, SSD1306_BLACK);
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceExcited() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Wide eyes animation
-    for (int i = 0; i < 2; i++) {
-        display.fillCircle(35, 25, 14, SSD1306_WHITE);
-        display.fillCircle(35, 25, 12, SSD1306_BLACK);
-        display.fillCircle(35, 25, 9, SSD1306_WHITE);
-        display.fillCircle(93, 25, 14, SSD1306_WHITE);
-        display.fillCircle(93, 25, 12, SSD1306_BLACK);
-        display.fillCircle(93, 25, 9, SSD1306_WHITE);
-        // Big smile
-        display.fillCircle(64, 42, 18, SSD1306_WHITE);
-        display.fillRect(10, 5, 108, 32, SSD1306_BLACK);
-        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-        display.display();
-        delay(150);
-    }
-}
-
-void displayFaceScared() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Wide open eyes (shocked look)
-    display.fillCircle(35, 22, 14, SSD1306_WHITE);
-    display.fillCircle(35, 22, 12, SSD1306_BLACK);
-    display.fillCircle(35, 22, 6, SSD1306_WHITE);
-    display.fillCircle(93, 22, 14, SSD1306_WHITE);
-    display.fillCircle(93, 22, 12, SSD1306_BLACK);
-    display.fillCircle(93, 22, 6, SSD1306_WHITE);
-    // Small O mouth
-    display.fillCircle(64, 46, 6, SSD1306_WHITE);
-    display.fillCircle(64, 46, 4, SSD1306_BLACK);
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceShock() {
-    // Animated shock
-    for (int i = 0; i < 3; i++) {
-        display.clearDisplay();
-        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-        // Extremely wide eyes
-        display.fillCircle(35, 22, 15, SSD1306_WHITE);
-        display.fillCircle(35, 22, 13, SSD1306_BLACK);
-        display.fillCircle(35, 22, 3, SSD1306_WHITE);
-        display.fillCircle(93, 22, 15, SSD1306_WHITE);
-        display.fillCircle(93, 22, 13, SSD1306_BLACK);
-        display.fillCircle(93, 22, 3, SSD1306_WHITE);
-        // Large O mouth
-        display.fillCircle(64, 46, 10, SSD1306_WHITE);
-        display.fillCircle(64, 46, 8, SSD1306_BLACK);
-        display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-        display.display();
-        delay(100);
-    }
-}
-
-void displayFaceAngry() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Angry eyebrows (angled lines above eyes)
-    display.drawLine(25, 15, 42, 20, SSD1306_WHITE);
-    display.drawLine(25, 14, 42, 19, SSD1306_WHITE);
-    display.drawLine(86, 20, 103, 15, SSD1306_WHITE);
-    display.drawLine(86, 19, 103, 14, SSD1306_WHITE);
-    // Narrow eyes
-    display.fillCircle(35, 25, 12, SSD1306_WHITE);
-    display.fillCircle(35, 25, 10, SSD1306_BLACK);
-    display.fillCircle(35, 25, 5, SSD1306_WHITE);
-    display.fillCircle(93, 25, 12, SSD1306_WHITE);
-    display.fillCircle(93, 25, 10, SSD1306_BLACK);
-    display.fillCircle(93, 25, 5, SSD1306_WHITE);
-    // Straight line mouth
-    display.drawLine(48, 48, 80, 48, SSD1306_WHITE);
-    display.drawLine(48, 49, 80, 49, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceRomantic() {
-    // Heart eyes animation
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Left heart
-    display.fillTriangle(30, 25, 35, 20, 40, 25, SSD1306_WHITE);
-    display.fillTriangle(30, 25, 35, 30, 40, 25, SSD1306_WHITE);
-    // Right heart
-    display.fillTriangle(88, 25, 93, 20, 98, 25, SSD1306_WHITE);
-    display.fillTriangle(88, 25, 93, 30, 98, 25, SSD1306_WHITE);
-    // Smile
-    display.drawCircle(64, 38, 12, SSD1306_WHITE);
-    display.fillRect(10, 5, 108, 32, SSD1306_BLACK);
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceCold() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Shivering eyes
-    display.fillCircle(33, 25, 11, SSD1306_WHITE);
-    display.fillCircle(33, 25, 9, SSD1306_BLACK);
-    display.fillCircle(33, 25, 5, SSD1306_WHITE);
-    display.fillCircle(95, 25, 11, SSD1306_WHITE);
-    display.fillCircle(95, 25, 9, SSD1306_BLACK);
-    display.fillCircle(95, 25, 5, SSD1306_WHITE);
-    // Wavy mouth (cold)
-    for (int x = 50; x < 78; x += 4) {
-        display.drawPixel(x, 46 + (x % 8 < 4 ? 0 : 2), SSD1306_WHITE);
-    }
-    // Snowflakes
-    display.drawPixel(15, 12, SSD1306_WHITE);
-    display.drawPixel(110, 18, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceHot() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Tired droopy eyes
-    display.fillCircle(35, 27, 12, SSD1306_WHITE);
-    display.fillCircle(35, 27, 10, SSD1306_BLACK);
-    display.fillCircle(35, 28, 4, SSD1306_WHITE);
-    display.fillCircle(93, 27, 12, SSD1306_WHITE);
-    display.fillCircle(93, 27, 10, SSD1306_BLACK);
-    display.fillCircle(93, 28, 4, SSD1306_WHITE);
-    // Panting mouth (open)
-    display.drawLine(56, 46, 72, 46, SSD1306_WHITE);
-    display.drawLine(58, 48, 70, 48, SSD1306_WHITE);
-    // Sweat drops
-    display.fillCircle(20, 22, 2, SSD1306_WHITE);
-    display.fillCircle(108, 26, 2, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceSerious() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Focused eyes (medium pupils, straight)
-    display.fillCircle(35, 25, 12, SSD1306_WHITE);
-    display.fillCircle(35, 25, 10, SSD1306_BLACK);
-    display.fillCircle(35, 25, 5, SSD1306_WHITE);
-    display.fillCircle(93, 25, 12, SSD1306_WHITE);
-    display.fillCircle(93, 25, 10, SSD1306_BLACK);
-    display.fillCircle(93, 25, 5, SSD1306_WHITE);
-    // Straight mouth
-    display.drawLine(52, 46, 76, 46, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceConfused() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // One eyebrow raised
-    display.drawLine(25, 18, 42, 18, SSD1306_WHITE);
-    display.drawLine(86, 15, 103, 18, SSD1306_WHITE);
-    // Eyes looking different directions
-    display.fillCircle(35, 25, 12, SSD1306_WHITE);
-    display.fillCircle(35, 25, 10, SSD1306_BLACK);
-    display.fillCircle(32, 25, 5, SSD1306_WHITE);
-    display.fillCircle(93, 25, 12, SSD1306_WHITE);
-    display.fillCircle(93, 25, 10, SSD1306_BLACK);
-    display.fillCircle(96, 25, 5, SSD1306_WHITE);
-    // Question mark
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(110, 10);
-    display.print("?");
-    // Wavy mouth
-    display.drawLine(52, 46, 56, 48, SSD1306_WHITE);
-    display.drawLine(56, 48, 64, 46, SSD1306_WHITE);
-    display.drawLine(64, 46, 72, 48, SSD1306_WHITE);
-    display.display();
-}
-
-void displayFaceCurious() {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-    // Wide eyes looking up
-    display.fillCircle(35, 24, 13, SSD1306_WHITE);
-    display.fillCircle(35, 24, 11, SSD1306_BLACK);
-    display.fillCircle(35, 21, 6, SSD1306_WHITE);
-    display.fillCircle(93, 24, 13, SSD1306_WHITE);
-    display.fillCircle(93, 24, 11, SSD1306_BLACK);
-    display.fillCircle(93, 21, 6, SSD1306_WHITE);
-    // Small O mouth
-    display.fillCircle(64, 46, 5, SSD1306_WHITE);
-    display.fillCircle(64, 46, 3, SSD1306_BLACK);
-    display.display();
-}
-
-// ============== Emotion Control Helper ==============
-void displayEmotionFace(Emotion emotion) {
-    switch (emotion) {
-        case EMOTION_HAPPY: displayFaceHappy(); break;
-        case EMOTION_SAD: displayFaceSad(); break;
-        case EMOTION_EXCITED: displayFaceExcited(); break;
-        case EMOTION_SCARED: displayFaceScared(); break;
-        case EMOTION_SHOCK: displayFaceShock(); break;
-        case EMOTION_ANGRY: displayFaceAngry(); break;
-        case EMOTION_ROMANTIC: displayFaceRomantic(); break;
-        case EMOTION_COLD: displayFaceCold(); break;
-        case EMOTION_HOT: displayFaceHot(); break;
-        case EMOTION_SERIOUS: displayFaceSerious(); break;
-        case EMOTION_CONFUSED: displayFaceConfused(); break;
-        case EMOTION_CURIOUS: displayFaceCurious(); break;
-        case EMOTION_SLEEPY: displayFaceSleeping(); break;
-        default: displayFaceNormal(); break;
-    }
-}
 
 Emotion parseEmotionString(String emotion) {
     emotion.toLowerCase();
@@ -585,139 +227,6 @@ Emotion parseEmotionString(String emotion) {
     else return EMOTION_NORMAL;
 }
 
-// ============== Speaking Face with Mouth Animation and Emotion ==============
-void displaySpeakingFace(Emotion emotion, int mouthPhase) {
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Draw eyes based on emotion
-    switch (emotion) {
-        case EMOTION_HAPPY:
-            // Large pupils (happy eyes)
-            display.fillCircle(35, 25, 12, SSD1306_WHITE);
-            display.fillCircle(35, 25, 10, SSD1306_BLACK);
-            display.fillCircle(35, 25, 7, SSD1306_WHITE);
-            display.fillCircle(93, 25, 12, SSD1306_WHITE);
-            display.fillCircle(93, 25, 10, SSD1306_BLACK);
-            display.fillCircle(93, 25, 7, SSD1306_WHITE);
-            break;
-        case EMOTION_SAD:
-            // Small pupils looking down
-            display.fillCircle(35, 27, 12, SSD1306_WHITE);
-            display.fillCircle(35, 27, 10, SSD1306_BLACK);
-            display.fillCircle(35, 30, 4, SSD1306_WHITE);
-            display.fillCircle(93, 27, 12, SSD1306_WHITE);
-            display.fillCircle(93, 27, 10, SSD1306_BLACK);
-            display.fillCircle(93, 30, 4, SSD1306_WHITE);
-            break;
-        case EMOTION_EXCITED:
-            // Wide eyes
-            display.fillCircle(35, 25, 14, SSD1306_WHITE);
-            display.fillCircle(35, 25, 12, SSD1306_BLACK);
-            display.fillCircle(35, 25, 9, SSD1306_WHITE);
-            display.fillCircle(93, 25, 14, SSD1306_WHITE);
-            display.fillCircle(93, 25, 12, SSD1306_BLACK);
-            display.fillCircle(93, 25, 9, SSD1306_WHITE);
-            break;
-        case EMOTION_ANGRY:
-            // Narrow eyes with eyebrows
-            display.drawLine(25, 15, 42, 20, SSD1306_WHITE);
-            display.drawLine(25, 14, 42, 19, SSD1306_WHITE);
-            display.drawLine(86, 20, 103, 15, SSD1306_WHITE);
-            display.drawLine(86, 19, 103, 14, SSD1306_WHITE);
-            display.fillCircle(35, 25, 12, SSD1306_WHITE);
-            display.fillCircle(35, 25, 10, SSD1306_BLACK);
-            display.fillCircle(35, 25, 5, SSD1306_WHITE);
-            display.fillCircle(93, 25, 12, SSD1306_WHITE);
-            display.fillCircle(93, 25, 10, SSD1306_BLACK);
-            display.fillCircle(93, 25, 5, SSD1306_WHITE);
-            break;
-        default:
-            // Normal eyes
-            display.fillCircle(35, 25, 12, SSD1306_WHITE);
-            display.fillCircle(35, 25, 10, SSD1306_BLACK);
-            display.fillCircle(35, 25, 6, SSD1306_WHITE);
-            display.fillCircle(93, 25, 12, SSD1306_WHITE);
-            display.fillCircle(93, 25, 10, SSD1306_BLACK);
-            display.fillCircle(93, 25, 6, SSD1306_WHITE);
-            break;
-    }
-
-    // Animated mouth (talking motion)
-    // mouthPhase: 0=closed, 1=half-open, 2=open, 3=half-open (cycles)
-    int mouthSize = 0;
-    if (mouthPhase == 1 || mouthPhase == 3) mouthSize = 4;  // Half open
-    else if (mouthPhase == 2) mouthSize = 8;  // Fully open
-
-    if (mouthSize > 0) {
-        display.fillCircle(64, 46, mouthSize, SSD1306_WHITE);
-        display.fillCircle(64, 46, mouthSize - 2, SSD1306_BLACK);
-    } else {
-        // Closed mouth (line)
-        display.drawLine(54, 46, 74, 46, SSD1306_WHITE);
-    }
-
-    display.display();
-}
-
-// ============== Animated Idle Face (Always Active) ==============
-void displayFaceIdleAnimated() {
-    // Breathing animation - subtle pupil size changes
-    int pupilSize = 5 + (breathPhase / 2);  // Pupil size varies from 5 to 10
-
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Left eye
-    display.fillCircle(35, 25, 12, SSD1306_WHITE);
-    display.fillCircle(35, 25, 10, SSD1306_BLACK);
-    display.fillCircle(35, 25, pupilSize, SSD1306_WHITE);
-
-    // Right eye
-    display.fillCircle(93, 25, 12, SSD1306_WHITE);
-    display.fillCircle(93, 25, 10, SSD1306_BLACK);
-    display.fillCircle(93, 25, pupilSize, SSD1306_WHITE);
-
-    // Mouth
-    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
-
-    display.display();
-}
-
-void blinkAnimation() {
-    // Quick blink
-    display.clearDisplay();
-    display.drawRoundRect(10, 5, 108, 54, 8, SSD1306_WHITE);
-
-    // Closed eyes
-    display.drawLine(35 - 8, 25, 35 + 8, 25, SSD1306_WHITE);
-    display.drawLine(93 - 8, 25, 93 + 8, 25, SSD1306_WHITE);
-    display.drawLine(50, 45, 78, 45, SSD1306_WHITE);
-
-    display.display();
-    delay(100);
-
-    // Eyes open again
-    displayFaceIdleAnimated();
-}
-
-void updateIdleAnimation() {
-    unsigned long currentTime = millis();
-
-    // Blink every 3-5 seconds randomly
-    if (currentTime - lastBlinkTime > random(3000, 5000)) {
-        blinkAnimation();
-        lastBlinkTime = currentTime;
-    }
-
-    // Breathing animation - update every 200ms
-    if (currentTime - lastBreathTime > 200) {
-        breathPhase++;
-        if (breathPhase > 10) breathPhase = 0;
-        displayFaceIdleAnimated();
-        lastBreathTime = currentTime;
-    }
-}
 
 // ============== Sound Effects System ==============
 // Alexa-style soothing sound effects for user feedback
@@ -799,8 +308,6 @@ void connectWiFi() {
     Serial.print("[WIFI] Connecting to ");
     Serial.println(WIFI_SSID);
 
-    displayMessage("NOVA AI", "Connecting WiFi...");
-
     // Try primary WiFi
     Serial.printf("[WIFI] Trying primary: %s\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -815,7 +322,6 @@ void connectWiFi() {
     // If primary fails, try backup WiFi
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\n[WIFI] Primary failed, trying backup...");
-        displayMessage("NOVA AI", "Trying backup WiFi...");
 
         WiFi.disconnect();
         delay(100);
@@ -861,13 +367,8 @@ void connectWiFi() {
             Serial.println("[WIFI] Signal Quality: WEAK - WILL cause audio lag!");
             Serial.println("[WIFI] >>> Move ESP32 closer to WiFi router <<<");
         }
-
-        displayFaceHappy();  // Show happy face when connected
-        delay(2000);
     } else {
         Serial.println("\n[WIFI] Both networks failed!");
-        displayMessage("NOVA AI", "WiFi Failed!");
-        delay(2000);
     }
 }
 
@@ -876,6 +377,107 @@ static int microphoneCallback(short *buffer, uint32_t n) {
     size_t bytesRead;
     i2s_read(MIC_I2S_NUM, buffer, n * sizeof(int16_t), &bytesRead, portMAX_DELAY);
     return 0;
+}
+
+// ============== Wake Word Detection Function ==============
+bool detectWakeWord() {
+    if (isMuted || isRecording || isPlaying) {
+        return false;  // Skip detection when muted or busy
+    }
+
+    // Read audio samples for inference (1 second = 16000 samples)
+    size_t bytesRead;
+    i2s_read(MIC_I2S_NUM, sampleBuffer, EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t), &bytesRead, portMAX_DELAY);
+
+    // Check if we have enough audio data
+    if (bytesRead < EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t)) {
+        if (DEBUG_WAKE_WORD) Serial.println("[WAKE] Insufficient audio data");
+        return false;
+    }
+
+    // Apply moderate gain (3x) and noise gate
+    int32_t totalEnergy = 0;
+    for (int i = 0; i < EI_CLASSIFIER_RAW_SAMPLE_COUNT; i++) {
+        sampleBuffer[i] *= WAKE_WORD_GAIN;
+        totalEnergy += abs(sampleBuffer[i]);
+    }
+
+    int32_t avgEnergy = totalEnergy / EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+    if (avgEnergy < NOISE_GATE_THRESHOLD) {
+        if (DEBUG_WAKE_WORD) Serial.printf("[WAKE] Below noise gate: %d < %d\n", avgEnergy, NOISE_GATE_THRESHOLD);
+        consecutiveWakeDetections = 0;
+        return false;
+    }
+
+    // Run Edge Impulse inference
+    ei_impulse_result_t result;
+    signal_t signal;
+
+    signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+    signal.get_data = [](size_t offset, size_t length, float *out_ptr) -> int {
+        for (size_t i = 0; i < length; i++) {
+            out_ptr[i] = (float)sampleBuffer[offset + i];
+        }
+        return 0;
+    };
+
+    EI_IMPULSE_ERROR res = run_classifier(&signal, &result, DEBUG_WAKE_WORD);
+
+    if (res != EI_IMPULSE_OK) {
+        Serial.printf("[WAKE] Inference error: %d\n", res);
+        consecutiveWakeDetections = 0;
+        return false;
+    }
+
+    // Find scores for "Nova", "noise", and "unknown"
+    float novaScore = 0.0f;
+    float noiseScore = 0.0f;
+    float unknownScore = 0.0f;
+
+    for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+        const char* label = result.classification[i].label;
+        float score = result.classification[i].value;
+
+        if (strcmp(label, "Nova") == 0) {
+            novaScore = score;
+        } else if (strcmp(label, "noise") == 0) {
+            noiseScore = score;
+        } else if (strcmp(label, "unknown") == 0) {
+            unknownScore = score;
+        }
+
+        if (DEBUG_WAKE_WORD) {
+            Serial.printf("[WAKE] %s: %.2f\n", label, score);
+        }
+    }
+
+    // Check if Nova score meets all criteria:
+    // 1. Above confidence threshold (0.60)
+    // 2. Higher than noise/unknown by confidence gap (0.10)
+    float maxOtherScore = max(noiseScore, unknownScore);
+    bool detected = (novaScore >= WAKE_WORD_CONFIDENCE) &&
+                    (novaScore > maxOtherScore + CONFIDENCE_GAP);
+
+    if (detected) {
+        consecutiveWakeDetections++;
+        Serial.printf("[WAKE] ✓ Nova: %.2f | Noise: %.2f | Unknown: %.2f | Consecutive: %d/%d\n",
+                      novaScore, noiseScore, unknownScore,
+                      consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
+
+        if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
+            Serial.println("\n[WAKE] ========== WAKE WORD DETECTED! ==========\n");
+            consecutiveWakeDetections = 0;
+            return true;
+        }
+    } else {
+        if (DEBUG_WAKE_WORD && novaScore > 0.3) {
+            Serial.printf("[WAKE] × Nova: %.2f | Noise: %.2f | Unknown: %.2f (below threshold)\n",
+                          novaScore, noiseScore, unknownScore);
+        }
+        consecutiveWakeDetections = 0;
+    }
+
+    return false;
 }
 
 // ============== Record Audio for Backend ==============
@@ -1063,9 +665,6 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                 case 6: currentEmotion = EMOTION_SHOCK; break;  // surprised -> shock
                 default: currentEmotion = EMOTION_NORMAL; break;
             }
-
-            // Display expression face before speaking
-            displayEmotionFace(currentEmotion);
         }
 
         // Get emotion from backend LLM (X-Emotion header) - fallback if no X-Expression
@@ -1073,9 +672,6 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
         if (emotionHeader.length() > 0) {
             currentEmotion = parseEmotionString(emotionHeader);
             Serial.printf("[EMOTION] Backend sent emotion: %s\n", emotionHeader.c_str());
-            // Display emotion face briefly before speaking
-            displayEmotionFace(currentEmotion);
-            delay(500);
         } else {
             currentEmotion = EMOTION_NORMAL;  // Default if no emotion provided
         }
@@ -1133,13 +729,6 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         totalStreamed += bytesRead;
                         noDataCount = 0; // Reset counter when data arrives
 
-                        // Animate mouth while speaking (update every 150ms)
-                        if (millis() - lastMouthUpdate > 150) {
-                            mouthPhase = (mouthPhase + 1) % 4;  // Cycle through 0,1,2,3
-                            displaySpeakingFace(currentEmotion, mouthPhase);
-                            lastMouthUpdate = millis();
-                        }
-
                         // Print progress every 2 seconds or when significant progress made
                         if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < bufferSize)) {
                             if (useContentLength) {
@@ -1169,25 +758,25 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                         // Already streaming - be VERY patient if we haven't received all data yet
                         noDataCount++;
 
-                        // If we know how much to expect, wait much longer
+                        // If we know how much to expect, wait MUCH longer
                         unsigned long maxWaitChecks;
                         if (useContentLength && totalStreamed < contentLength) {
-                            // Still expecting more data - wait up to 15 seconds
-                            maxWaitChecks = 1500; // 15 seconds
+                            // Still expecting more data - wait up to 30 seconds
+                            maxWaitChecks = 30000; // 30 seconds (very patient!)
 
                             // Log every 5 seconds of waiting
-                            if (noDataCount % 500 == 0) {
+                            if (noDataCount % 5000 == 0) {
                                 Serial.printf("[STREAM] Waiting for more data... (%d / %d bytes received, %.1f%% complete)\n",
                                     totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
                             }
                         } else {
                             // Either no Content-Length, or we got all expected data
-                            maxWaitChecks = 500; // 5 seconds
+                            maxWaitChecks = 10000; // 10 seconds (also very patient!)
                         }
 
                         if (noDataCount >= maxWaitChecks) {
                             Serial.printf("[STREAM] No more data after %lu checks (%.1f seconds)\n",
-                                noDataCount, noDataCount * 0.01);
+                                noDataCount, noDataCount / 1000.0);
 
                             if (useContentLength && totalStreamed < contentLength) {
                                 Serial.printf("[ERROR] INCOMPLETE STREAM! Expected %d bytes but only got %d bytes (%.1f%%)\n",
@@ -1198,17 +787,22 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                             break;
                         }
 
-                        // Secondary check: connection closed
+                        // Secondary check: connection closed - but keep waiting for Content-Length
                         if (!http.connected() && !stream->available()) {
-                            // Wait a bit more even if connection closed, in case data is still in buffer
-                            if (noDataCount > 100) { // Wait at least 1 second after connection closes
-                                Serial.println("[STREAM] Connection closed and no data for 1+ second");
-
-                                if (useContentLength && totalStreamed < contentLength) {
-                                    Serial.printf("[ERROR] Connection closed early! Expected %d, played %d bytes (%.1f%%)\n",
-                                        contentLength, totalStreamed, (float)totalStreamed * 100.0 / contentLength);
+                            // If we have Content-Length and haven't received it all, keep waiting
+                            if (useContentLength && totalStreamed < contentLength) {
+                                // Keep waiting - data might still arrive
+                                if (noDataCount % 5000 == 0) {
+                                    Serial.printf("[STREAM] Connection closed but still waiting for data (%d/%d bytes)\n",
+                                        totalStreamed, contentLength);
                                 }
-                                break;
+                                // Don't break - keep waiting until maxWaitChecks
+                            } else {
+                                // No Content-Length or we got everything - wait 3 seconds then stop
+                                if (noDataCount > 3000) {
+                                    Serial.println("[STREAM] Connection closed and no data for 3+ seconds");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1219,6 +813,18 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 
             Serial.printf("[STREAM] Total played: %d bytes\n", totalStreamed);
             free(buffer);
+
+            // IMPORTANT: Wait for I2S DMA to finish playing buffered audio
+            // At 16kHz, 16-bit stereo (4 bytes/sample), DMA buffers can hold:
+            // 24 buffers × 1024 bytes = 24KB ≈ 6 seconds of audio
+            if (totalStreamed > 0) {
+                // Calculate approximate playback time for buffered audio
+                // 16kHz × 2 channels × 2 bytes = 64,000 bytes/second
+                int dmaBufferBytes = 24 * 1024; // 24 DMA buffers
+                int waitMs = (dmaBufferBytes * 1000) / 64000; // ~375ms
+                Serial.printf("[SPK] Waiting %dms for DMA buffer to finish playing...\n", waitMs);
+                delay(waitMs + 200); // Extra 200ms margin for safety
+            }
         }
 
         i2s_zero_dma_buffer(SPK_I2S_NUM);
@@ -1240,24 +846,15 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
 void startListening() {
     Serial.println("\n========== LISTENING ==========");
     setLedColor(0, 255, 255); // Cyan (Alexa Listening)
-    displayFaceListening();  // Animated listening face
     soundListening();  // High ping - attention sound
-
 
     size_t bytesRecorded = 0;
     uint8_t* audioData = recordAudio(&bytesRecorded);
 
     if (audioData && bytesRecorded > 0) {
-        displayFaceProcessing();  // Animated thinking face
         sendAndPlay(audioData, bytesRecorded);
         free(audioData);
     }
-
-    // Reset animation timers and return to idle animation
-    lastBlinkTime = millis();
-    lastBreathTime = millis();
-    breathPhase = 0;
-    displayFaceIdleAnimated();  // Back to animated idle face
 
     Serial.println("================================\n");
     consecutiveWakeDetections = 0;  // Reset wake word counter
@@ -1279,21 +876,15 @@ void setup() {
     } else if (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED) {
         Serial.println("[POWER] Power-on reset or first boot");
     }
-    
+
     setupMicrophone();
 
-    // Setup Button (GPIO 0 - Boot Button)
+    // Setup Button (GPIO 4)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
     setupSpeaker();
 
-    // Setup OLED Display
-    setupOLED();
-    displayMessage("NOVA AI", "Speaker Init...");
-
     connectWiFi();
-
-
 
     // Init LED
     pixels.begin();
@@ -1305,17 +896,12 @@ void setup() {
 
     setLedColor(0, 0, 0); // Off
 
-    displayFaceHappy();  // Show happy face
-    delay(1500);
-
-    // Initialize animation timers
-    lastBlinkTime = millis();
-    lastBreathTime = millis();
-    breathPhase = 0;
-
-    displayFaceIdleAnimated();  // Start with animated idle face
-
-    Serial.println("\n[READY] Say 'Hey Nova' or type 'l'\n");
+    Serial.println("\n[READY] NOVA AI Speaker Ready!");
+    Serial.println("Controls:");
+    Serial.println("  - Press BUTTON (GPIO 4) to start listening");
+    Serial.println("  - Type 'l' to start listening");
+    Serial.println("  - Type 'r' for mic test (record 10s & playback)");
+    Serial.println("  - Long press BUTTON (3s) to sleep\n");
 }
 
 // ============== Loop ==============
@@ -1338,12 +924,9 @@ void loop() {
         // Long press detected - enter deep sleep
         if (pressDuration >= LONG_PRESS_TIME) {
             Serial.println("\n[POWER] Long press detected - Shutting down...");
-            displayMessage("Power Off", "Good Night!");
             setLedColor(255, 0, 0); // Red
             delay(1500);
             setLedColor(0, 0, 0); // Off
-            display.clearDisplay();
-            display.display();
 
             // Configure wake-up source: Button press to wake up
             // GPIO 4 is INPUT_PULLUP, so it's HIGH when not pressed
@@ -1374,15 +957,9 @@ void loop() {
             // Audio Feedback
             if (isMuted) {
                 setLedColor(0, 0, 0); // Off (save battery)
-                displayFaceSleeping();  // Show sleeping face
                 soundMute(); // Descending tone - going quiet
             } else {
                 setLedColor(0, 0, 0); // Off
-                // Reset animation and show animated idle face
-                lastBlinkTime = millis();
-                lastBreathTime = millis();
-                breathPhase = 0;
-                displayFaceIdleAnimated();
                 soundUnmute(); // Ascending tone - becoming active
             }
         }
@@ -1396,75 +973,122 @@ void loop() {
         if (cmd == 'l' || cmd == 'L') {
             startListening();
         }
-    }
+        else if (cmd == 'r' || cmd == 'R') {
+            // Microphone test - record and playback
+            Serial.println("\n========== MIC TEST MODE ==========");
+            Serial.println("[TEST] Recording 10 seconds...");
+            setLedColor(255, 0, 0); // Red - recording
 
-    // In OTA mode, skip all tasks except OTA handling
+            const size_t recordDuration = 10; // 10 seconds
+            const size_t bufferSize = 16000 * 2 * recordDuration; // 16kHz, 16-bit, 10s
+            uint8_t* testBuffer = (uint8_t*)malloc(bufferSize);
 
-
-    // Update idle animation when active (not muted)
-    if (!isRecording && !isPlaying && !isMuted) {
-        updateIdleAnimation();
-    }
-
-    // Wake word detection using continuous inference
-    if (!isRecording && !isPlaying && !isMuted) {
-        // Read a slice of audio
-        static int16_t audioBuffer[EI_CLASSIFIER_SLICE_SIZE];
-        size_t bytesRead;
-
-        esp_err_t err = i2s_read(MIC_I2S_NUM, audioBuffer,
-            EI_CLASSIFIER_SLICE_SIZE * sizeof(int16_t),
-            &bytesRead, portMAX_DELAY);
-
-        if (err != ESP_OK || bytesRead == 0) {
-            return;
-        }
-
-        // Apply 10x Gain (Software amplification for far-field detection)
-        for (int i = 0; i < bytesRead / 2; i++) {
-            int32_t sample = audioBuffer[i] * 10;
-            if (sample > 32767) sample = 32767;
-            if (sample < -32768) sample = -32768;
-            audioBuffer[i] = (int16_t)sample;
-        }
-
-        // Create signal from the audio buffer
-        signal_t signal;
-        signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
-        signal.get_data = [](size_t offset, size_t length, float *out) -> int {
-            numpy::int16_to_float(&audioBuffer[offset], out, length);
-            return 0;
-        };
-
-        // Run continuous classifier
-        ei_impulse_result_t result = {0};
-        EI_IMPULSE_ERROR eiErr = run_classifier_continuous(&signal, &result, false);
-
-        if (eiErr == EI_IMPULSE_OK) {
-            // Check for wake word (index 0 = "Nova", index 1 = "noise", index 2 = "unknown")
-            float novaConf = result.classification[0].value;
-            float noiseConf = result.classification[1].value;
-            float unknownConf = result.classification[2].value;
-
-            // Only trigger if Nova confidence is high AND it's the dominant class
-            if (novaConf > WAKE_WORD_CONFIDENCE &&
-                novaConf > noiseConf &&
-                novaConf > unknownConf) {
-                consecutiveWakeDetections++;
-                Serial.printf("[WAKE] Nova: %.2f | Noise: %.2f | Unknown: %.2f (%d/%d)\n",
-                    novaConf, noiseConf, unknownConf,
-                    consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
-
-                if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
-                    Serial.println("[WAKE] *** WAKE WORD CONFIRMED! ***");
-                    startListening();
-                }
+            if (!testBuffer) {
+                Serial.println("[ERROR] Failed to allocate test buffer!");
+                setLedColor(0, 0, 0);
             } else {
-                consecutiveWakeDetections = 0;
+                size_t totalBytes = 0;
+                size_t bytesRead = 0;
+
+                i2s_zero_dma_buffer(MIC_I2S_NUM);
+                delay(100);
+
+                unsigned long startTime = millis();
+                while ((millis() - startTime) < (recordDuration * 1000) && totalBytes < bufferSize) {
+                    i2s_read(MIC_I2S_NUM, testBuffer + totalBytes, 1024, &bytesRead, portMAX_DELAY);
+                    totalBytes += bytesRead;
+
+                    // Print progress every second
+                    if ((millis() - startTime) % 1000 < 50) {
+                        int16_t* samples = (int16_t*)(testBuffer + totalBytes - bytesRead);
+                        int32_t maxLevel = 0;
+                        for (size_t i = 0; i < bytesRead / 2; i++) {
+                            if (abs(samples[i]) > maxLevel) maxLevel = abs(samples[i]);
+                        }
+                        Serial.printf("[TEST] %ds | Max Level: %d | Bytes: %d\n",
+                            (millis() - startTime) / 1000, maxLevel, totalBytes);
+                    }
+                }
+
+                Serial.printf("[TEST] Recorded %d bytes in %d seconds\n",
+                    totalBytes, (millis() - startTime) / 1000);
+
+                // Calculate and show audio statistics
+                int16_t* samples = (int16_t*)testBuffer;
+                size_t numSamples = totalBytes / 2;
+                int32_t maxLevel = 0;
+                int64_t totalEnergy = 0;
+
+                for (size_t i = 0; i < numSamples; i++) {
+                    int32_t level = abs(samples[i]);
+                    totalEnergy += level;
+                    if (level > maxLevel) maxLevel = level;
+                }
+
+                int32_t avgLevel = totalEnergy / numSamples;
+                Serial.printf("[TEST] Audio Stats: Max=%d, Avg=%d\n", maxLevel, avgLevel);
+
+                if (maxLevel < 100) {
+                    Serial.println("[WARNING] Very low audio levels - mic might not be working!");
+                } else if (maxLevel > 30000) {
+                    Serial.println("[WARNING] Very high audio levels - might be clipping!");
+                } else {
+                    Serial.println("[TEST] Audio levels look good!");
+                }
+
+                // Playback
+                Serial.println("[TEST] Playing back recording...");
+                setLedColor(0, 255, 0); // Green - playing
+                delay(500);
+
+                // Convert mono to stereo for playback
+                int16_t stereoSample[2];
+                size_t bytesWritten;
+
+                for (size_t i = 0; i < numSamples; i++) {
+                    stereoSample[0] = samples[i]; // Left
+                    stereoSample[1] = samples[i]; // Right
+                    i2s_write(SPK_I2S_NUM, stereoSample, 4, &bytesWritten, portMAX_DELAY);
+                }
+
+                i2s_zero_dma_buffer(SPK_I2S_NUM);
+                free(testBuffer);
+
+                Serial.println("[TEST] Playback complete!");
+                setLedColor(0, 0, 0); // Off
+                Serial.println("===================================\n");
             }
         }
     }
 
-    // delay(10); // Removed for speed optimization
+    // ============== Continuous Wake Word Detection ==============
+    // Run inference every INFERENCE_INTERVAL_MS (500ms) for continuous monitoring
+    if (!isMuted && !isRecording && !isPlaying &&
+        (millis() - lastInferenceTime >= INFERENCE_INTERVAL_MS)) {
 
+        lastInferenceTime = millis();
+
+        if (detectWakeWord()) {
+            // Wake word detected! Start recording and conversation
+            setLedColor(0, 255, 255); // Cyan (listening)
+            soundListening();  // High ping - attention sound
+            delay(200);
+
+            // Record user's message
+            size_t bytesRecorded;
+            uint8_t* audioData = recordAudio(&bytesRecorded);
+
+            if (audioData && bytesRecorded > 0) {
+                // Send to backend and play response
+                sendAndPlay(audioData, bytesRecorded);
+                free(audioData);
+            }
+
+            // Reset for next wake word detection
+            consecutiveWakeDetections = 0;
+            setLedColor(0, 0, 0); // Off
+        }
+    }
+
+    delay(10);  // Small delay to prevent CPU hogging
 }

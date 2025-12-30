@@ -5,6 +5,10 @@
 #define WIFI_SSID "HOME"
 #define WIFI_PASSWORD "96089608"
 
+// Backup WiFi
+#define WIFI_SSID_BACKUP "Mr Raj"
+#define WIFI_PASSWORD_BACKUP "pass-9608"
+
 // ============== Backend Server ==============
 #define BACKEND_HOST "nova.mejona.com"  // OCI Domain
 #define BACKEND_PORT 80  // HTTP (Nginx Proxy > Python 8000)
