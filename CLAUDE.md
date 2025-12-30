@@ -131,20 +131,29 @@ docker run -p 8001:8001 --env-file .env nova-ai-backend-go
 - Sample Rate: 16kHz (both recording and playback)
 - Bit Depth: 16-bit PCM
 - Recording Duration: 3 seconds
-- Wake Word Confidence: 0.91 (91%)
+- Wake Word Confidence: 0.75 (75%)
+- Confidence Gap: 0.20 (20% higher than noise/unknown)
+- Consecutive Detections: 1 (responsive triggering)
 
 ### Backend Environment Variables (`.env`)
 
 Both Python and Go backends require:
 ```bash
 GROQ_API_KEY=gsk_xxxxxxxxxxxx
+TUYA_ACCESS_ID=your_tuya_access_id
+TUYA_ACCESS_SECRET=your_tuya_access_secret
 ```
 
 **Groq API Services Used:**
 - **STT**: `whisper-large-v3-turbo` (16kHz audio)
 - **LLM**: `llama-3.3-70b-versatile` (conversational AI)
-- **TTS**: `canopylabs/orpheus-v1-english` (voice: autumn)
-- **Fallback TTS**: Google gTTS (when Orpheus fails)
+- **TTS**: `canopylabs/orpheus-v1-english` (voice: diana - female, natural)
+- **Fallback TTS**: Edge TTS (Microsoft Azure TTS, free alternative)
+
+**Tuya Smart Home Integration:**
+- Controls smart lights via Tuya Cloud API
+- Automatic token refresh every 90 minutes
+- Device ID configured in `backend/tuya_controller.py`
 
 ## Architecture Details
 
@@ -184,8 +193,10 @@ GROQ_API_KEY=gsk_xxxxxxxxxxxx
 1. Convert PCM → WAV for Groq Whisper API
 2. Transcribe audio using Whisper (language: English)
 3. Generate response using Llama 3.3 70B with personality prompt
-4. Synthesize speech using Orpheus TTS (with gTTS fallback)
-5. Convert WAV → PCM and return to ESP32
+4. **Process light control commands** (extract markers like `[LIGHT_ON]`, `[LIGHT_COLOR:blue]`)
+5. **Execute Tuya API commands** if light control markers detected
+6. Synthesize speech using Orpheus TTS (with Edge TTS fallback)
+7. Convert WAV → PCM (16kHz stereo) and return to ESP32
 
 **AI Personality** (SYSTEM_PROMPT):
 - NOVA: Indian girlfriend personality
@@ -217,8 +228,10 @@ GROQ_API_KEY=gsk_xxxxxxxxxxxx
 
 **Detection Logic**:
 - Requires consecutive detections above threshold
-- Confidence threshold: 0.91 (configurable in `WAKE_WORD_CONFIDENCE`)
-- Consecutive detections: 1 (configurable in `CONSECUTIVE_DETECTIONS`)
+- Confidence threshold: 0.75 (75%, configurable in `WAKE_WORD_CONFIDENCE`)
+- Confidence gap: 0.20 (20%, Nova score must be 20% higher than noise/unknown)
+- Consecutive detections: 1 (responsive triggering, configurable in `CONSECUTIVE_DETECTIONS`)
+- Noise gate: 100 (minimum audio level to process, reduces false positives)
 
 ## Deployment Architecture
 
@@ -286,6 +299,17 @@ backend-go/
 ### Edge Impulse Library (`lib/ei-wake-word/`)
 Pre-built Edge Impulse SDK with wake word model (not typically modified)
 
+### Tuya Smart Home (`backend/tuya_controller.py`)
+```
+backend/
+├── tuya_controller.py    # Tuya API integration
+│   ├── TuyaOpenAPI class (authentication, token management)
+│   ├── SmartLightController (high-level commands)
+│   └── Automatic token refresh (every 90 minutes)
+├── test_tuya.py          # API testing script
+└── test_ai_prompt.py     # AI marker generation testing
+```
+
 ## Development Notes
 
 ### ESP32 Memory Considerations
@@ -299,6 +323,16 @@ Pre-built Edge Impulse SDK with wake word model (not typically modified)
 - **Recording Gain**: 3x amplification compensates for quiet INMP441
 - **I2S Buffer Sizes**: Larger DMA buffers (16×1024) improve stability
 - **Speaker Playback**: Streaming directly from HTTP prevents memory issues
+- **APLL Configuration**: APLL disabled for speaker (`use_apll = false`) - fixes 2x playback speed issue
+- **Stereo Output**: Backend sends stereo PCM (left/right channels duplicated) for MAX98357A compatibility
+
+### WiFi Performance Optimizations
+Critical settings in `src/main.cpp` (lines 348-380):
+- **Power Save**: Disabled (`WiFi.setSleep(false)`) for ultra-low latency
+- **TX Power**: Maximum 19.5dBm (`WiFi.setTxPower(WIFI_POWER_19_5dBm)`) for stronger signal
+- **Auto-Reconnect**: Enabled (`WiFi.setAutoReconnect(true)`) to reduce disconnections
+- **Persistent Mode**: Disabled (`WiFi.persistent(false)`) for faster reconnection without flash writes
+- **ESP-IDF Power Save**: None (`esp_wifi_set_ps(WIFI_PS_NONE)`) for consistent performance
 
 ### Debugging Commands
 
@@ -328,6 +362,27 @@ Pre-built Edge Impulse SDK with wake word model (not typically modified)
 
 **Modifying AI Personality**:
 Edit `SYSTEM_PROMPT` in `backend/main.py` (Python) or `backend-go/main.go` (Go)
+
+**Testing Tuya Light Control**:
+```bash
+cd backend
+
+# Test Tuya API directly
+python test_tuya.py
+
+# Test AI marker generation
+python test_ai_prompt.py
+
+# Manual API testing with curl (see backend/CURL_EXAMPLES.md)
+```
+
+**Light Control Commands** (voice commands):
+- "Turn on the light" → `[LIGHT_ON]`
+- "Turn off the light" → `[LIGHT_OFF]`
+- "Make it blue" → `[LIGHT_COLOR:blue]`
+- "Set brightness to 50%" → `[LIGHT_BRIGHTNESS:50]`
+- "Turn on blue light" → `[LIGHT_ON] [LIGHT_COLOR:blue]`
+- Supported colors: red, blue, green, purple, pink, yellow, orange, cyan, white, warm, cool
 
 **Testing Backend Locally**:
 ```bash
@@ -381,6 +436,18 @@ Currently uses USB upload. For OTA updates, add ESP32 OTA library and implement 
 - Use streaming audio playback instead of buffering
 - Free audio buffers after use
 
+**"Audio playing at 2x speed (too fast)"**:
+- APLL should be disabled for speaker in `setupSpeaker()` function
+- Verify `use_apll = false` in speaker I2S configuration (line 200 in main.cpp)
+- Backend should send stereo PCM (left/right channels duplicated)
+
+**"Light control not working"**:
+- Verify Tuya credentials in `.env` file
+- Check backend logs for `[TUYA]` messages
+- Test Tuya API directly with `python backend/test_tuya.py`
+- Verify AI is generating markers with `python backend/test_ai_prompt.py`
+- Check device ID matches in `backend/tuya_controller.py`
+
 ## Git Workflow
 
 Recent commits show the project uses:
@@ -392,3 +459,60 @@ When committing:
 - Test firmware builds with `pio run` before commit
 - Verify backend with `uvicorn` or `go run`
 - Include both firmware and backend changes if API contract changed
+- Use conventional commit format: `fix(audio):`, `feat(tuya):`, `docs:`, etc.
+
+## Deployment to Production (OCI Server)
+
+### Backend Deployment via SSH
+
+**Server Details**:
+- Host: `nova.mejona.com` (161.118.184.207)
+- SSH Key: `D:\Mejona Workspace\Product\Home-Assistant\oci_key_new`
+- User: `ubuntu`
+- Backend Directory: `~/nova-ai-backend`
+
+**Deploy Updated Backend**:
+```bash
+# SSH into server
+ssh -i "D:\Mejona Workspace\Product\Home-Assistant\oci_key_new" ubuntu@161.118.184.207
+
+# Navigate to backend directory
+cd ~/nova-ai-backend
+
+# Pull latest code (if using git)
+git pull
+
+# Rebuild Docker image (no cache for fresh build)
+sudo docker build --no-cache -t nova-backend .
+
+# Stop and remove old container
+sudo docker stop nova-ai-backend
+sudo docker rm nova-ai-backend
+
+# Start new container
+sudo docker run -d --name nova-ai-backend -p 8000:8000 --env-file .env nova-backend
+
+# Check logs
+sudo docker logs -f nova-ai-backend
+
+# Verify it's running
+curl http://localhost:8000
+```
+
+**Check Backend Status**:
+```bash
+# List running containers
+sudo docker ps -a | grep nova
+
+# View logs
+sudo docker logs nova-ai-backend
+
+# Restart container if needed
+sudo docker restart nova-ai-backend
+```
+
+### Important Deployment Notes
+- Environment variables (`.env`) must be present on server with Groq + Tuya credentials
+- Nginx proxy configuration in `/etc/nginx/sites-available/nova.mejona.com`
+- Server runs Docker containers for easy updates and isolation
+- Backend auto-initializes Tuya token and weather monitoring on startup
