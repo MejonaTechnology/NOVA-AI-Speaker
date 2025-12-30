@@ -35,8 +35,8 @@
 
 // ============== Silence Detection ==============
 #define SILENCE_THRESHOLD       300    // Audio level threshold (lower = more sensitive)
-#define SILENCE_DURATION_MS     3000   // 3 seconds of silence to stop recording
-#define MIN_RECORD_DURATION_MS  1000   // Minimum 1 second recording
+#define SILENCE_DURATION_MS     2000   // 2 seconds of silence to stop recording (faster response)
+#define MIN_RECORD_DURATION_MS  1500   // Minimum 1.5 seconds recording (better transcription)
 
 // Calculated values
 #define RECORD_BUFFER_SIZE  (SAMPLE_RATE * RECORD_SECONDS * (BITS_PER_SAMPLE / 8))

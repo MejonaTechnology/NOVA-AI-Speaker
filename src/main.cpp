@@ -890,8 +890,10 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
                 // 16kHz × 2 channels × 2 bytes = 64,000 bytes/second
                 int dmaBufferBytes = 24 * 1024; // 24 DMA buffers
                 int waitMs = (dmaBufferBytes * 1000) / 64000; // ~375ms
-                Serial.printf("[SPK] Waiting %dms for DMA buffer to finish playing...\n", waitMs);
-                delay(waitMs + 200); // Extra 200ms margin for safety
+                // CRITICAL FIX: Increase wait time to ensure last 1-2 seconds play completely
+                int extraWaitMs = 1500; // Wait extra 1.5 seconds to be safe
+                Serial.printf("[SPK] Waiting %dms for DMA buffer to finish playing...\n", waitMs + extraWaitMs);
+                delay(waitMs + extraWaitMs);
             }
         }
 

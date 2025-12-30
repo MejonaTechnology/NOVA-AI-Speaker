@@ -91,7 +91,11 @@ class TuyaOpenAPI:
 
     def send_commands(self, device_id, commands, retry=True):
         """Send commands to a device with automatic token refresh on failure"""
+        # Force fresh token if current token is expired or doesn't exist
         if not self.access_token or time.time() >= self.token_expiry:
+            # Invalidate old token to force fresh authentication
+            self.access_token = None
+            self.token_expiry = 0
             if not self.get_access_token():
                 print("[TUYA] Failed to get access token")
                 return False

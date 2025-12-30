@@ -276,12 +276,18 @@ async def refresh_tuya_token_periodically():
         await asyncio.sleep(90 * 60)  # 90 minutes = 5400 seconds
         try:
             print("[TUYA] Proactive token refresh...")
+            # Invalidate current token to force fresh authentication
+            light_controller.api.access_token = None
+            light_controller.api.token_expiry = 0
             if light_controller.api.get_access_token():
                 print("[TUYA] Token refreshed successfully (proactive)")
             else:
                 print("[TUYA] Token refresh failed (will retry in 90 min)")
         except Exception as e:
             print(f"[TUYA] Error refreshing token: {e}")
+            # Invalidate token on error to force fresh token on next request
+            light_controller.api.access_token = None
+            light_controller.api.token_expiry = 0
 
 
 @app.on_event("startup")
@@ -596,8 +602,8 @@ async def process_voice(request: Request):
         # Use new chunked TTS generation function
         audio_array = await generate_tts_audio(ai_text)
 
-        # Apply volume scaling - 100% maximum volume (no scaling)
-        audio_array = (audio_array * 1.0).astype(np.int16)
+        # Apply volume scaling - 150% for louder output (1.5x amplification)
+        audio_array = np.clip(audio_array * 1.5, -32768, 32767).astype(np.int16)
 
         # Convert mono to stereo (ESP32 MAX98357 needs stereo)
         stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
