@@ -34,8 +34,8 @@
 #define I2S_BUFFER_SIZE     1024
 
 // ============== Silence Detection ==============
-#define SILENCE_THRESHOLD       150    // Audio level threshold (lower = more sensitive, better silence detection)
-#define SILENCE_DURATION_MS     1500   // 1.5 seconds of silence to stop recording (faster response)
+#define SILENCE_THRESHOLD       50     // Audio level threshold (very sensitive to detect silence)
+#define SILENCE_DURATION_MS     1000   // 1 second of silence to stop recording
 #define MIN_RECORD_DURATION_MS  1500   // Minimum 1.5 seconds recording (better transcription)
 
 // Calculated values
