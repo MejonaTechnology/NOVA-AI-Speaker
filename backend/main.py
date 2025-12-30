@@ -574,7 +574,7 @@ async def process_voice(request: Request):
         messages.append({"role": "user", "content": user_text})
 
         chat_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",  # Faster model with higher rate limits
             messages=messages,
             max_tokens=500,  # Allow longer responses for better conversations
             temperature=0.7
