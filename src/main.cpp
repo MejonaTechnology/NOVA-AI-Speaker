@@ -197,7 +197,7 @@ void setupSpeaker() {
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 24,   // Increased from 16 for smoother playback
         .dma_buf_len = 1024,
-        .use_apll = true,      // Enable APLL for better audio quality
+        .use_apll = false,     // APLL disabled - fixes 2x speed playback issue
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
     };
@@ -211,7 +211,7 @@ void setupSpeaker() {
 
     ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_NUM, &i2s_config, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_NUM, &pin_config));
-    Serial.println("[SPK] Enhanced speaker initialized (16kHz, APLL enabled)");
+    Serial.println("[SPK] Speaker initialized (16kHz stereo, standard clock)");
 }
 
 // ============== Display Functions Removed ==============
