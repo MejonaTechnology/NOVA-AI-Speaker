@@ -29,7 +29,8 @@
       "Bash(tasklist:*)",
       "Bash(timeout 30 pio device monitor:*)",
       "Bash(timeout 60 pio device monitor:*)",
-      "Bash(xcopy:*)"
+      "Bash(xcopy:*)",
+      "WebFetch(domain:docs.edgeimpulse.com)"
     ],
     "deny": [],
     "ask": []

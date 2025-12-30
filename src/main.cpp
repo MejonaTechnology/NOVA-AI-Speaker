@@ -11,14 +11,13 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-// Optimized settings matching Edge Impulse browser portal
+// Optimized settings matching Edge Impulse browser portal (continuous inference mode)
 #define WAKE_WORD_CONFIDENCE 0.60f  // 60% threshold (EI_CLASSIFIER_THRESHOLD default)
 #define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections for reliability
 #define NOISE_GATE_THRESHOLD 100    // Minimum audio level to process (reduced false positives)
-#define WAKE_WORD_GAIN 3            // Moderate gain (3x) for natural audio levels
+#define WAKE_WORD_GAIN 8            // 8x gain to match Edge Impulse portal example
 #define CONFIDENCE_GAP 0.10f        // Nova score must be 10% higher than Noise/Unknown
 #define DEBUG_WAKE_WORD false       // Disable debug output for production use
-#define INFERENCE_INTERVAL_MS 500   // Run inference every 500ms (continuous detection)
 
 // ============== Button Configuration ==============
 #define BUTTON_PIN 4
@@ -32,7 +31,6 @@ bool isRecording = false;
 bool isPlaying = false;
 int consecutiveWakeDetections = 0;
 static bool micReady = false;
-unsigned long lastInferenceTime = 0;  // Timing for continuous wake word detection
 
 
 // ============== Emotion Control ==============
@@ -54,8 +52,18 @@ enum Emotion {
 };
 Emotion currentEmotion = EMOTION_NORMAL;
 
-// Audio buffers for wake word
-static int16_t sampleBuffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT];
+// Audio buffers for wake word (continuous inference with double buffering)
+typedef struct {
+    int16_t *buffers[2];
+    uint8_t buf_select;
+    uint8_t buf_ready;
+    uint32_t buf_count;
+    uint32_t n_samples;
+} inference_t;
+
+static inference_t inference;
+static int16_t sampleBuffer[2048];  // Temporary buffer for I2S reads
+static int print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);  // Print after full window
 
 // ============== NeoPixel Setup ==============
 Adafruit_NeoPixel pixels(NUM_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -372,109 +380,154 @@ void connectWiFi() {
     }
 }
 
-// ============== Microphone Callback for Edge Impulse ==============
-static int microphoneCallback(short *buffer, uint32_t n) {
-    size_t bytesRead;
-    i2s_read(MIC_I2S_NUM, buffer, n * sizeof(int16_t), &bytesRead, portMAX_DELAY);
+// ============== Continuous Inference Helper Functions ==============
+
+/**
+ * @brief Get audio signal data for Edge Impulse classifier
+ */
+static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
+    // Convert int16 to float from the inactive buffer
+    for (size_t i = 0; i < length; i++) {
+        out_ptr[i] = (float)inference.buffers[inference.buf_select ^ 1][offset + i];
+    }
     return 0;
 }
 
-// ============== Wake Word Detection Function ==============
+/**
+ * @brief Initialize continuous inference buffers
+ */
+static bool microphone_inference_start(uint32_t n_samples) {
+    inference.buffers[0] = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if (inference.buffers[0] == NULL) {
+        Serial.println("[WAKE] Failed to allocate buffer 0");
+        return false;
+    }
+
+    inference.buffers[1] = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if (inference.buffers[1] == NULL) {
+        free(inference.buffers[0]);
+        Serial.println("[WAKE] Failed to allocate buffer 1");
+        return false;
+    }
+
+    inference.buf_select = 0;
+    inference.buf_count = 0;
+    inference.n_samples = n_samples;
+    inference.buf_ready = 0;
+
+    Serial.printf("[WAKE] Continuous inference initialized (slice size: %d samples)\n", n_samples);
+    return true;
+}
+
+/**
+ * @brief Stop continuous inference and free buffers
+ */
+static void microphone_inference_end(void) {
+    if (inference.buffers[0]) free(inference.buffers[0]);
+    if (inference.buffers[1]) free(inference.buffers[1]);
+    inference.buffers[0] = NULL;
+    inference.buffers[1] = NULL;
+}
+
+// ============== Continuous Wake Word Detection Function ==============
 bool detectWakeWord() {
     if (isMuted || isRecording || isPlaying) {
         return false;  // Skip detection when muted or busy
     }
 
-    // Read audio samples for inference (1 second = 16000 samples)
+    // Read one slice of audio (250ms = 4000 samples at 16kHz)
     size_t bytesRead;
-    i2s_read(MIC_I2S_NUM, sampleBuffer, EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t), &bytesRead, portMAX_DELAY);
+    i2s_read(MIC_I2S_NUM, sampleBuffer, 2048 * sizeof(int16_t), &bytesRead, portMAX_DELAY);
 
-    // Check if we have enough audio data
-    if (bytesRead < EI_CLASSIFIER_RAW_SAMPLE_COUNT * sizeof(int16_t)) {
-        if (DEBUG_WAKE_WORD) Serial.println("[WAKE] Insufficient audio data");
+    if (bytesRead <= 0) {
+        if (DEBUG_WAKE_WORD) Serial.println("[WAKE] I2S read error");
         return false;
     }
 
-    // Apply moderate gain (3x) and noise gate
-    int32_t totalEnergy = 0;
-    for (int i = 0; i < EI_CLASSIFIER_RAW_SAMPLE_COUNT; i++) {
-        sampleBuffer[i] *= WAKE_WORD_GAIN;
-        totalEnergy += abs(sampleBuffer[i]);
+    // Apply 8x gain to match Edge Impulse portal (like the official example)
+    for (int i = 0; i < bytesRead / 2; i++) {
+        sampleBuffer[i] = (int16_t)(sampleBuffer[i] * 8);
     }
 
-    int32_t avgEnergy = totalEnergy / EI_CLASSIFIER_RAW_SAMPLE_COUNT;
-    if (avgEnergy < NOISE_GATE_THRESHOLD) {
-        if (DEBUG_WAKE_WORD) Serial.printf("[WAKE] Below noise gate: %d < %d\n", avgEnergy, NOISE_GATE_THRESHOLD);
-        consecutiveWakeDetections = 0;
-        return false;
-    }
+    // Fill the double buffer (ping-pong buffering)
+    for (int i = 0; i < bytesRead / 2; i++) {
+        inference.buffers[inference.buf_select][inference.buf_count++] = sampleBuffer[i];
 
-    // Run Edge Impulse inference
-    ei_impulse_result_t result;
-    signal_t signal;
-
-    signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
-    signal.get_data = [](size_t offset, size_t length, float *out_ptr) -> int {
-        for (size_t i = 0; i < length; i++) {
-            out_ptr[i] = (float)sampleBuffer[offset + i];
+        if (inference.buf_count >= inference.n_samples) {
+            // Buffer full, switch buffers
+            inference.buf_select ^= 1;
+            inference.buf_count = 0;
+            inference.buf_ready = 1;
+            break;
         }
-        return 0;
-    };
+    }
 
-    EI_IMPULSE_ERROR res = run_classifier(&signal, &result, DEBUG_WAKE_WORD);
+    // Only run inference when we have a full slice ready
+    if (inference.buf_ready == 0) {
+        return false;
+    }
+
+    inference.buf_ready = 0;
+
+    // Run continuous classifier (accumulates slices internally)
+    signal_t signal;
+    signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
+    signal.get_data = &microphone_audio_signal_get_data;
+    ei_impulse_result_t result = {0};
+
+    EI_IMPULSE_ERROR res = run_classifier_continuous(&signal, &result, DEBUG_WAKE_WORD);
 
     if (res != EI_IMPULSE_OK) {
         Serial.printf("[WAKE] Inference error: %d\n", res);
-        consecutiveWakeDetections = 0;
         return false;
     }
 
-    // Find scores for "Nova", "noise", and "unknown"
-    float novaScore = 0.0f;
-    float noiseScore = 0.0f;
-    float unknownScore = 0.0f;
+    // Only check results after processing a full window (4 slices = 1 second)
+    if (++print_results >= EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW) {
+        // Find scores for "Nova", "noise", and "unknown"
+        float novaScore = 0.0f;
+        float noiseScore = 0.0f;
+        float unknownScore = 0.0f;
 
-    for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-        const char* label = result.classification[i].label;
-        float score = result.classification[i].value;
+        for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+            const char* label = result.classification[i].label;
+            float score = result.classification[i].value;
 
-        if (strcmp(label, "Nova") == 0) {
-            novaScore = score;
-        } else if (strcmp(label, "noise") == 0) {
-            noiseScore = score;
-        } else if (strcmp(label, "unknown") == 0) {
-            unknownScore = score;
+            if (strcmp(label, "Nova") == 0) {
+                novaScore = score;
+            } else if (strcmp(label, "noise") == 0) {
+                noiseScore = score;
+            } else if (strcmp(label, "unknown") == 0) {
+                unknownScore = score;
+            }
         }
 
-        if (DEBUG_WAKE_WORD) {
-            Serial.printf("[WAKE] %s: %.2f\n", label, score);
-        }
-    }
+        // Check if Nova score meets all criteria
+        float maxOtherScore = max(noiseScore, unknownScore);
+        bool detected = (novaScore >= WAKE_WORD_CONFIDENCE) &&
+                        (novaScore > maxOtherScore + CONFIDENCE_GAP);
 
-    // Check if Nova score meets all criteria:
-    // 1. Above confidence threshold (0.60)
-    // 2. Higher than noise/unknown by confidence gap (0.10)
-    float maxOtherScore = max(noiseScore, unknownScore);
-    bool detected = (novaScore >= WAKE_WORD_CONFIDENCE) &&
-                    (novaScore > maxOtherScore + CONFIDENCE_GAP);
+        if (detected) {
+            consecutiveWakeDetections++;
+            Serial.printf("[WAKE] ✓ Nova: %.2f | Noise: %.2f | Unknown: %.2f | Consecutive: %d/%d\n",
+                          novaScore, noiseScore, unknownScore,
+                          consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
 
-    if (detected) {
-        consecutiveWakeDetections++;
-        Serial.printf("[WAKE] ✓ Nova: %.2f | Noise: %.2f | Unknown: %.2f | Consecutive: %d/%d\n",
-                      novaScore, noiseScore, unknownScore,
-                      consecutiveWakeDetections, CONSECUTIVE_DETECTIONS);
-
-        if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
-            Serial.println("\n[WAKE] ========== WAKE WORD DETECTED! ==========\n");
+            if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
+                Serial.println("\n[WAKE] ========== WAKE WORD DETECTED! ==========\n");
+                consecutiveWakeDetections = 0;
+                print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);  // Reset
+                return true;
+            }
+        } else {
+            if (DEBUG_WAKE_WORD || novaScore > 0.3) {
+                Serial.printf("[WAKE] Nova: %.2f | Noise: %.2f | Unknown: %.2f\n",
+                              novaScore, noiseScore, unknownScore);
+            }
             consecutiveWakeDetections = 0;
-            return true;
         }
-    } else {
-        if (DEBUG_WAKE_WORD && novaScore > 0.3) {
-            Serial.printf("[WAKE] × Nova: %.2f | Noise: %.2f | Unknown: %.2f (below threshold)\n",
-                          novaScore, noiseScore, unknownScore);
-        }
-        consecutiveWakeDetections = 0;
+
+        print_results = 0;  // Reset for next window
     }
 
     return false;
@@ -896,8 +949,26 @@ void setup() {
 
     setLedColor(0, 0, 0); // Off
 
+    // Initialize continuous wake word detection
+    Serial.printf("\n[WAKE] Initializing continuous inference...\n");
+    Serial.printf("[WAKE] Slice size: %d samples (%.0f ms)\n",
+                  EI_CLASSIFIER_SLICE_SIZE,
+                  (float)EI_CLASSIFIER_SLICE_SIZE / 16.0f);
+    Serial.printf("[WAKE] Window: %d slices = %d samples (%.0f ms)\n",
+                  EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW,
+                  EI_CLASSIFIER_RAW_SAMPLE_COUNT,
+                  (float)EI_CLASSIFIER_RAW_SAMPLE_COUNT / 16.0f);
+
+    if (microphone_inference_start(EI_CLASSIFIER_SLICE_SIZE) == false) {
+        Serial.println("[WAKE] ERROR: Failed to start continuous inference!");
+    } else {
+        run_classifier_init();  // Initialize Edge Impulse classifier
+        Serial.println("[WAKE] Continuous inference ready!");
+    }
+
     Serial.println("\n[READY] NOVA AI Speaker Ready!");
     Serial.println("Controls:");
+    Serial.println("  - Wake word: Say 'Nova' to activate");
     Serial.println("  - Press BUTTON (GPIO 4) to start listening");
     Serial.println("  - Type 'l' to start listening");
     Serial.println("  - Type 'r' for mic test (record 10s & playback)");
@@ -1062,33 +1133,27 @@ void loop() {
     }
 
     // ============== Continuous Wake Word Detection ==============
-    // Run inference every INFERENCE_INTERVAL_MS (500ms) for continuous monitoring
-    if (!isMuted && !isRecording && !isPlaying &&
-        (millis() - lastInferenceTime >= INFERENCE_INTERVAL_MS)) {
+    // Continuous inference runs on every loop (no timing delay needed)
+    // The double buffering and slice-based approach handles timing automatically
+    if (detectWakeWord()) {
+        // Wake word detected! Start recording and conversation
+        setLedColor(0, 255, 255); // Cyan (listening)
+        soundListening();  // High ping - attention sound
+        delay(200);
 
-        lastInferenceTime = millis();
+        // Record user's message
+        size_t bytesRecorded;
+        uint8_t* audioData = recordAudio(&bytesRecorded);
 
-        if (detectWakeWord()) {
-            // Wake word detected! Start recording and conversation
-            setLedColor(0, 255, 255); // Cyan (listening)
-            soundListening();  // High ping - attention sound
-            delay(200);
-
-            // Record user's message
-            size_t bytesRecorded;
-            uint8_t* audioData = recordAudio(&bytesRecorded);
-
-            if (audioData && bytesRecorded > 0) {
-                // Send to backend and play response
-                sendAndPlay(audioData, bytesRecorded);
-                free(audioData);
-            }
-
-            // Reset for next wake word detection
-            consecutiveWakeDetections = 0;
-            setLedColor(0, 0, 0); // Off
+        if (audioData && bytesRecorded > 0) {
+            // Send to backend and play response
+            sendAndPlay(audioData, bytesRecorded);
+            free(audioData);
         }
-    }
 
-    delay(10);  // Small delay to prevent CPU hogging
+        // Reset for next wake word detection
+        consecutiveWakeDetections = 0;
+        print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);
+        setLedColor(0, 0, 0); // Off
+    }
 }
