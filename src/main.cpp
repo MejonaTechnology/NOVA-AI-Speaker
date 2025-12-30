@@ -13,7 +13,7 @@
 // ============== Wake Word Configuration ==============
 // Optimized settings matching Edge Impulse browser portal (continuous inference mode)
 #define WAKE_WORD_CONFIDENCE 0.60f  // 60% threshold (EI_CLASSIFIER_THRESHOLD default)
-#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections for reliability
+#define CONSECUTIVE_DETECTIONS 1    // Single detection (like Edge Impulse portal)
 #define NOISE_GATE_THRESHOLD 100    // Minimum audio level to process (reduced false positives)
 #define WAKE_WORD_GAIN 8            // 8x gain to match Edge Impulse portal example
 #define CONFIDENCE_GAP 0.10f        // Nova score must be 10% higher than Noise/Unknown
