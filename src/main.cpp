@@ -519,8 +519,15 @@ bool detectWakeWord() {
 
         // Check if Nova score meets all criteria
         float maxOtherScore = max(noiseScore, unknownScore);
+
+        // WORKAROUND: Reject if model looks poorly trained (all other classes near 0)
+        // A good model should show SOME confidence in noise/unknown when NOT detecting wake word
+        float totalOtherScore = noiseScore + unknownScore;
+        bool modelLooksReasonable = (totalOtherScore > 0.05f) || (novaScore > 0.97f);
+
         bool detected = (novaScore >= WAKE_WORD_CONFIDENCE) &&
-                        (novaScore > maxOtherScore + CONFIDENCE_GAP);
+                        (novaScore > maxOtherScore + CONFIDENCE_GAP) &&
+                        modelLooksReasonable;
 
         if (detected) {
             consecutiveWakeDetections++;
