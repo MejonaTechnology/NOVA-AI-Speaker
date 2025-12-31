@@ -66,8 +66,8 @@ ei_dsp_config_mfcc_t ei_dsp_config_855743_2 = {
     32, // int num_filters
     512, // int fft_length
     151, // int win_size
-    80, // int low_frequency
-    0, // int high_frequency
+    300, // int low_frequency
+    8000, // int high_frequency
     0.98f, // float pre_cof
     1 // int pre_shift
 };
@@ -151,7 +151,7 @@ const ei_impulse_t impulse_855743_1 = {
     .project_name = "test-new",
     .impulse_id = 1,
     .impulse_name = "Impulse #1",
-    .deploy_version = 12,
+    .deploy_version = 14,
 
     .nn_input_frame_size = 637,
     .raw_sample_count = 16000,
