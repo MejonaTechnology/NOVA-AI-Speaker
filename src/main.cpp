@@ -12,9 +12,9 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-// Optimized settings for REDUCED false positives (strict detection)
+// Optimized settings for WORKING detection with poorly trained model
 #define WAKE_WORD_CONFIDENCE 0.92f  // 92% threshold (strict - prevents false triggers)
-#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections (reduces false positives)
+#define CONSECUTIVE_DETECTIONS 1    // Single detection (responsive - model is flaky)
 #define NOISE_GATE_THRESHOLD 200    // Minimum audio level to process (filters background noise)
 #define WAKE_WORD_GAIN 8            // 8x gain to match Edge Impulse portal example
 #define CONFIDENCE_GAP 0.30f        // Nova score must be 30% higher than Noise/Unknown (strict)
@@ -520,14 +520,15 @@ bool detectWakeWord() {
         // Check if Nova score meets all criteria
         float maxOtherScore = max(noiseScore, unknownScore);
 
-        // WORKAROUND: Reject if model looks poorly trained (all other classes near 0)
-        // A good model should show SOME confidence in noise/unknown when NOT detecting wake word
-        float totalOtherScore = noiseScore + unknownScore;
-        bool modelLooksReasonable = (totalOtherScore > 0.05f) || (novaScore > 0.97f);
+        // WORKAROUND: Add cooldown to prevent rapid re-triggering
+        // With poorly trained model (Noise always 0.00), just rely on high confidence threshold
+        static unsigned long lastTriggerTime = 0;
+        unsigned long currentTime = millis();
+        bool cooldownPassed = (currentTime - lastTriggerTime > 3000); // 3 second cooldown
 
         bool detected = (novaScore >= WAKE_WORD_CONFIDENCE) &&
                         (novaScore > maxOtherScore + CONFIDENCE_GAP) &&
-                        modelLooksReasonable;
+                        cooldownPassed;
 
         if (detected) {
             consecutiveWakeDetections++;
@@ -537,6 +538,7 @@ bool detectWakeWord() {
 
             if (consecutiveWakeDetections >= CONSECUTIVE_DETECTIONS) {
                 Serial.println("\n[WAKE] ========== WAKE WORD DETECTED! ==========\n");
+                lastTriggerTime = currentTime; // Set cooldown timer
                 consecutiveWakeDetections = 0;
                 print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);  // Reset
                 return true;
