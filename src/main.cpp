@@ -12,12 +12,12 @@
 #include <test-new_inferencing.h>
 
 // ============== Wake Word Configuration ==============
-// Optimized settings matching Edge Impulse browser portal (continuous inference mode)
-#define WAKE_WORD_CONFIDENCE 0.80f  // 80% threshold (balanced sensitivity)
-#define CONSECUTIVE_DETECTIONS 1    // Single detection for responsive triggering
-#define NOISE_GATE_THRESHOLD 100    // Minimum audio level to process (reduced false positives)
+// Optimized settings for REDUCED false positives (strict detection)
+#define WAKE_WORD_CONFIDENCE 0.92f  // 92% threshold (strict - prevents false triggers)
+#define CONSECUTIVE_DETECTIONS 2    // Require 2 consecutive detections (reduces false positives)
+#define NOISE_GATE_THRESHOLD 200    // Minimum audio level to process (filters background noise)
 #define WAKE_WORD_GAIN 8            // 8x gain to match Edge Impulse portal example
-#define CONFIDENCE_GAP 0.20f        // Nova score must be 20% higher than Noise/Unknown (balanced)
+#define CONFIDENCE_GAP 0.30f        // Nova score must be 30% higher than Noise/Unknown (strict)
 #define DEBUG_WAKE_WORD false       // Disable debug output for production use
 
 // ============== Button Configuration ==============
