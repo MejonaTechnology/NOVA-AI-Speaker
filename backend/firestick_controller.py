@@ -9,7 +9,12 @@ import re
 import os
 
 # ADB Configuration
-ADB_PATH = r"C:\Users\Mr Raj\Downloads\platform-tools-latest-windows\platform-tools\adb.exe"
+# ADB Configuration
+import platform
+if platform.system() == "Windows":
+    ADB_PATH = r"C:\Users\Mr Raj\Downloads\platform-tools-latest-windows\platform-tools\adb.exe"
+else:
+    ADB_PATH = "adb"  # On Linux/Docker, use system adb
 
 
 class FirestickController:
