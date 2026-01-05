@@ -563,6 +563,8 @@ async def generate_tts_audio(text: str):
     then concatenates all audio arrays into a single stream.
     Returns numpy array at 16kHz mono.
     """
+    from pydub import AudioSegment
+
     chunks = chunk_text_for_tts(text, max_length=200)
     print(f"[TTS] Split into {len(chunks)} chunks for Orpheus")
 
@@ -598,7 +600,6 @@ async def generate_tts_audio(text: str):
                     audio_data += chunk_data["data"]
 
             # Convert MP3 to WAV using pydub
-            from pydub import AudioSegment
             mp3_buffer = io.BytesIO(audio_data)
             audio = AudioSegment.from_mp3(mp3_buffer)
             wav_buffer = io.BytesIO()
