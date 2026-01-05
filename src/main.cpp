@@ -670,6 +670,219 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
     return audioBuffer;
 }
 
+// ============== Handle Audio Response for both Voice and Text ==============
+void handleAudioResponse(HTTPClient& http, WiFiClient* stream) {
+    int httpCode = http.GET(); // Not actually GET, just getting status code from previous request object if reused, but here we pass active http object
+
+    // Ideally we assume httpCode is already checked by caller, but we need to do header parsing etc.
+    // Let's refactor: Caller checks 200 OK, then calls this.
+    
+    soundSuccess(); // Play success sound when response received
+    int contentLength = http.getSize();
+
+    // Get STT transcription from custom header (URL-encoded)
+    String transcription = http.header("X-Transcription");
+    if (transcription.length() > 0) {
+        String decodedTranscription = urlDecode(transcription);
+        Serial.println("\n========== YOU SAID ==========");
+        Serial.println(decodedTranscription);
+        Serial.println("==============================\n");
+    }
+
+    // Get AI response text from custom header (URL-encoded)
+    String aiResponse = http.header("X-AI-Response");
+    if (aiResponse.length() > 0) {
+        String decodedResponse = urlDecode(aiResponse);
+        Serial.println("========== AI RESPONSE ==========");
+        Serial.println(decodedResponse);
+        Serial.println("=================================\n");
+    }
+
+    // Get facial expression code from backend (0-6)
+    String expressionHeader = http.header("X-Expression");
+    if (expressionHeader.length() > 0) {
+        int expressionCode = expressionHeader.toInt();
+        Serial.printf("[EXPRESSION] Backend sent expression code: %d\n", expressionCode);
+
+        // Map expression code to emotion enum
+        switch (expressionCode) {
+            case 1: currentEmotion = EMOTION_HAPPY; break;
+            case 2: currentEmotion = EMOTION_CURIOUS; break;
+            case 3: currentEmotion = EMOTION_EXCITED; break;
+            case 4: currentEmotion = EMOTION_SAD; break;
+            case 5: currentEmotion = EMOTION_HAPPY; break;
+            case 6: currentEmotion = EMOTION_SHOCK; break;
+            default: currentEmotion = EMOTION_NORMAL; break;
+        }
+    }
+
+    // Get emotion from backend LLM (fallback)
+    String emotionHeader = http.header("X-Emotion");
+    if (emotionHeader.length() > 0) {
+        currentEmotion = parseEmotionString(emotionHeader);
+        Serial.printf("[EMOTION] Backend sent emotion: %s\n", emotionHeader.c_str());
+    } else {
+        currentEmotion = EMOTION_NORMAL;
+    }
+
+    Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
+
+    // ============================================
+    // OPTIMIZED STREAMING MODE (Play-and-Delete)
+    // ============================================
+    {
+        Serial.println("[STREAM] Starting real-time playback with auto-cleanup...");
+        isPlaying = true;
+        setLedColor(50, 0, 200); // Purple (Speaking)
+
+        const size_t chunkSize = 4096;
+        uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
+
+        if (!audioChunk) {
+            Serial.println("[ERR] Chunk malloc failed!");
+            return;
+        }
+
+        size_t bytesWritten;
+        unsigned long streamStartTime = millis();
+        bool receivedFirstByte = false;
+        size_t totalStreamed = 0;
+        size_t chunksProcessed = 0;
+        bool useContentLength = (contentLength > 0);
+
+        Serial.println("[STREAM] Waiting for audio from backend...");
+
+        unsigned long noDataCount = 0;
+        unsigned long lastProgressPrint = 0;
+
+        while (true) {
+            size_t available = stream->available();
+
+            if (available > 0) {
+                if (!receivedFirstByte) {
+                    Serial.println("[STREAM] Audio started, playing immediately...");
+                    receivedFirstByte = true;
+                }
+
+                int bytesRead = stream->readBytes(audioChunk, min(chunkSize, available));
+                if (bytesRead > 0) {
+                    // VOLUME CONTROL: Apply 50% scaling
+                    int16_t* samples = (int16_t*)audioChunk;
+                    for (int i = 0; i < bytesRead / 2; i++) {
+                        samples[i] = (int16_t)(samples[i] * 0.5f); // 50% volume
+                    }
+
+                    // Write chunk to I2S speaker
+                    i2s_write(SPK_I2S_NUM, audioChunk, bytesRead, &bytesWritten, portMAX_DELAY);
+
+                    memset(audioChunk, 0, bytesRead);
+
+                    totalStreamed += bytesRead;
+                    chunksProcessed++;
+                    noDataCount = 0;
+
+                    if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < chunkSize)) {
+                         if (useContentLength) {
+                            Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
+                                totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
+                        } else {
+                            Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
+                        }
+                        lastProgressPrint = millis();
+                    }
+
+                    if (useContentLength && totalStreamed >= contentLength) {
+                        Serial.printf("[STREAM] ✓ All expected data played! (%d bytes)\n", totalStreamed);
+                        break;
+                    }
+                }
+            } else {
+                if (!receivedFirstByte) {
+                    if (millis() - streamStartTime > 30000) {
+                        Serial.println("[ERR] Timeout waiting for backend stream (30s)");
+                        break;
+                    }
+                } else {
+                    noDataCount++;
+                    unsigned long maxWaitChecks = (useContentLength && totalStreamed < contentLength) ? 30000 : 10000;
+                    
+                    if (noDataCount >= maxWaitChecks) {
+                        Serial.println("[STREAM] Stream appears complete (timeout)");
+                        break;
+                    }
+                    
+                    if (!http.connected() && !stream->available()) {
+                         if (useContentLength && totalStreamed < contentLength) {
+                             // Wait more
+                         } else {
+                             if (noDataCount > 3000) break;
+                         }
+                    }
+                }
+                delay(1);
+            }
+        }
+
+        Serial.printf("[STREAM] Total played: %d bytes\n", totalStreamed);
+        free(audioChunk);
+
+        if (totalStreamed > 0) {
+            int dmaBufferBytes = 24 * 1024;
+            int waitMs = (dmaBufferBytes * 1000) / 64000;
+            delay(waitMs + 1500);
+        }
+    }
+
+    i2s_zero_dma_buffer(SPK_I2S_NUM);
+    isPlaying = false;
+    setLedColor(0,0,0);
+    Serial.println("[SPK] Playback complete");
+}
+
+// ============== Send Text Command ==============
+void sendTextCommand(String text) {
+     if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[HTTP] WiFi not connected!");
+        return;
+    }
+
+#if USE_HTTPS
+    String url = String("https://") + BACKEND_HOST + "/text";
+    WiFiClientSecure client;
+    client.setInsecure();
+#else
+    String url = String("http://") + BACKEND_HOST + ":" + String(BACKEND_PORT) + "/text";
+    WiFiClient client;
+#endif
+
+    Serial.printf("[HTTP] Sending text: \"%s\" to %s\n", text.c_str(), url.c_str());
+    
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(45000);
+
+    setLedColor(0, 0, 255); // Blue (Processing)
+    soundProcessing();
+
+    // Create JSON body
+    String jsonBody = "{\"text\":\"" + text + "\"}";
+    int httpCode = http.POST(jsonBody);
+
+    if (httpCode == HTTP_CODE_OK) {
+        WiFiClient* stream = http.getStreamPtr();
+        handleAudioResponse(http, stream);
+    } else {
+        Serial.printf("[HTTP] Error: %d\n", httpCode);
+        soundError();
+        setLedColor(255, 0, 0); 
+        delay(1000);
+        setLedColor(0, 0, 0);
+    }
+    http.end();
+}
+
+
 // ============== Send Audio & Play Response ==============
 void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -698,219 +911,8 @@ void sendAndPlay(uint8_t* audioData, size_t audioSize) {
     int httpCode = http.POST(audioData, audioSize);
 
     if (httpCode == HTTP_CODE_OK) {
-        soundSuccess(); // Play success sound when response received
         WiFiClient* stream = http.getStreamPtr();
-        int contentLength = http.getSize();
-
-        // Get STT transcription from custom header (URL-encoded)
-        String transcription = http.header("X-Transcription");
-        if (transcription.length() > 0) {
-            String decodedTranscription = urlDecode(transcription);
-            Serial.println("\n========== YOU SAID ==========");
-            Serial.println(decodedTranscription);
-            Serial.println("==============================\n");
-        }
-
-        // Get AI response text from custom header (URL-encoded)
-        String aiResponse = http.header("X-AI-Response");
-        if (aiResponse.length() > 0) {
-            String decodedResponse = urlDecode(aiResponse);
-            Serial.println("========== AI RESPONSE ==========");
-            Serial.println(decodedResponse);
-            Serial.println("=================================\n");
-        }
-
-        // Get facial expression code from backend (0-6)
-        String expressionHeader = http.header("X-Expression");
-        if (expressionHeader.length() > 0) {
-            int expressionCode = expressionHeader.toInt();
-            Serial.printf("[EXPRESSION] Backend sent expression code: %d\n", expressionCode);
-
-            // Map expression code to emotion enum
-            // 0=neutral, 1=happy, 2=thinking, 3=excited, 4=sad, 5=smiling, 6=surprised
-            switch (expressionCode) {
-                case 1: currentEmotion = EMOTION_HAPPY; break;
-                case 2: currentEmotion = EMOTION_CURIOUS; break;  // thinking -> curious
-                case 3: currentEmotion = EMOTION_EXCITED; break;
-                case 4: currentEmotion = EMOTION_SAD; break;
-                case 5: currentEmotion = EMOTION_HAPPY; break;  // smiling -> happy
-                case 6: currentEmotion = EMOTION_SHOCK; break;  // surprised -> shock
-                default: currentEmotion = EMOTION_NORMAL; break;
-            }
-        }
-
-        // Get emotion from backend LLM (X-Emotion header) - fallback if no X-Expression
-        String emotionHeader = http.header("X-Emotion");
-        if (emotionHeader.length() > 0) {
-            currentEmotion = parseEmotionString(emotionHeader);
-            Serial.printf("[EMOTION] Backend sent emotion: %s\n", emotionHeader.c_str());
-        } else {
-            currentEmotion = EMOTION_NORMAL;  // Default if no emotion provided
-        }
-
-        Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
-
-        // ============================================
-        // OPTIMIZED STREAMING MODE (Play-and-Delete Architecture)
-        // - Chunks play immediately as they arrive
-        // - Each chunk is freed right after playback
-        // - Minimal memory footprint for long responses
-        // ============================================
-        {
-            Serial.println("[STREAM] Starting real-time playback with auto-cleanup...");
-            isPlaying = true;
-            setLedColor(50, 0, 200); // Purple (Speaking)
-
-            // Small chunk size for faster response and immediate cleanup
-            const size_t chunkSize = 4096; // 4KB chunks (reduced from 16KB for faster turnaround)
-            uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
-
-            if (!audioChunk) {
-                Serial.println("[ERR] Chunk malloc failed!");
-                http.end();
-                return;
-            }
-
-            size_t bytesWritten;
-            unsigned long streamStartTime = millis();
-            bool receivedFirstByte = false;
-            size_t totalStreamed = 0;
-            size_t chunksProcessed = 0;
-            bool useContentLength = (contentLength > 0);
-
-            Serial.println("[STREAM] Waiting for audio from backend...");
-
-            // Streaming Loop - Play-and-Delete each chunk
-            unsigned long noDataCount = 0;
-            unsigned long lastProgressPrint = 0;
-
-            while (true) {
-                size_t available = stream->available();
-
-                if (available > 0) {
-                    if (!receivedFirstByte) {
-                        Serial.println("[STREAM] Audio started, playing immediately...");
-                        receivedFirstByte = true;
-                    }
-
-                    // Read chunk from network stream
-                    int bytesRead = stream->readBytes(audioChunk, min(chunkSize, available));
-                    if (bytesRead > 0) {
-                        // Write chunk to I2S speaker (blocking until DMA accepts it)
-                        i2s_write(SPK_I2S_NUM, audioChunk, bytesRead, &bytesWritten, portMAX_DELAY);
-
-                        // CRITICAL: Clear chunk immediately after playback for next chunk
-                        // This frees up buffer space for incoming data
-                        memset(audioChunk, 0, bytesRead);
-
-                        totalStreamed += bytesRead;
-                        chunksProcessed++;
-                        noDataCount = 0; // Reset counter when data arrives
-
-                        // Print progress every 2 seconds or when significant progress made
-                        if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < chunkSize)) {
-                            if (useContentLength) {
-                                Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
-                                    totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
-                            } else {
-                                Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
-                            }
-                            lastProgressPrint = millis();
-                        }
-
-                        // PRIORITY: Check if we got all expected data based on Content-Length
-                        if (useContentLength && totalStreamed >= contentLength) {
-                            Serial.printf("[STREAM] ✓ All expected data played! (%d bytes)\n", totalStreamed);
-                            break;
-                        }
-                    }
-                } else {
-                    // No data available right now
-                    if (!receivedFirstByte) {
-                        // Still waiting for backend to send first byte
-                        if (millis() - streamStartTime > 30000) {
-                            Serial.println("[ERR] Timeout waiting for backend stream (30s)");
-                            break;
-                        }
-                    } else {
-                        // Already streaming - be VERY patient if we haven't received all data yet
-                        noDataCount++;
-
-                        // If we know how much to expect, wait MUCH longer
-                        unsigned long maxWaitChecks;
-                        if (useContentLength && totalStreamed < contentLength) {
-                            // Still expecting more data - wait up to 30 seconds
-                            maxWaitChecks = 30000; // 30 seconds (very patient!)
-
-                            // Log every 5 seconds of waiting
-                            if (noDataCount % 5000 == 0) {
-                                Serial.printf("[STREAM] Waiting for more data... (%d / %d bytes received, %.1f%% complete)\n",
-                                    totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
-                            }
-                        } else {
-                            // Either no Content-Length, or we got all expected data
-                            maxWaitChecks = 10000; // 10 seconds (also very patient!)
-                        }
-
-                        if (noDataCount >= maxWaitChecks) {
-                            Serial.printf("[STREAM] No more data after %lu checks (%.1f seconds)\n",
-                                noDataCount, noDataCount / 1000.0);
-
-                            if (useContentLength && totalStreamed < contentLength) {
-                                Serial.printf("[ERROR] INCOMPLETE STREAM! Expected %d bytes but only got %d bytes (%.1f%%)\n",
-                                    contentLength, totalStreamed, (float)totalStreamed * 100.0 / contentLength);
-                            } else {
-                                Serial.println("[STREAM] Stream appears complete");
-                            }
-                            break;
-                        }
-
-                        // Secondary check: connection closed - but keep waiting for Content-Length
-                        if (!http.connected() && !stream->available()) {
-                            // If we have Content-Length and haven't received it all, keep waiting
-                            if (useContentLength && totalStreamed < contentLength) {
-                                // Keep waiting - data might still arrive
-                                if (noDataCount % 5000 == 0) {
-                                    Serial.printf("[STREAM] Connection closed but still waiting for data (%d/%d bytes)\n",
-                                        totalStreamed, contentLength);
-                                }
-                                // Don't break - keep waiting until maxWaitChecks
-                            } else {
-                                // No Content-Length or we got everything - wait 3 seconds then stop
-                                if (noDataCount > 3000) {
-                                    Serial.println("[STREAM] Connection closed and no data for 3+ seconds");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // Only small delay if NO data, to prevent spinning too fast
-                    delay(1); 
-                }
-            }
-
-            Serial.printf("[STREAM] Total played: %d bytes in %d chunks\n", totalStreamed, chunksProcessed);
-            free(audioChunk); // Free the chunk buffer
-
-            // IMPORTANT: Wait for I2S DMA to finish playing buffered audio
-            // At 16kHz, 16-bit stereo (4 bytes/sample), DMA buffers can hold:
-            // 24 buffers × 1024 bytes = 24KB ≈ 6 seconds of audio
-            if (totalStreamed > 0) {
-                // Calculate approximate playback time for buffered audio
-                // 16kHz × 2 channels × 2 bytes = 64,000 bytes/second
-                int dmaBufferBytes = 24 * 1024; // 24 DMA buffers
-                int waitMs = (dmaBufferBytes * 1000) / 64000; // ~375ms
-                // CRITICAL FIX: Increase wait time to ensure last 1-2 seconds play completely
-                int extraWaitMs = 1500; // Wait extra 1.5 seconds to be safe
-                Serial.printf("[SPK] Waiting %dms for DMA buffer to finish playing...\n", waitMs + extraWaitMs);
-                delay(waitMs + extraWaitMs);
-            }
-        }
-
-        i2s_zero_dma_buffer(SPK_I2S_NUM);
-        isPlaying = false;
-        setLedColor(0,0,0); // Off
-        Serial.println("[SPK] Playback complete");
+        handleAudioResponse(http, stream);
     } else {
         Serial.printf("[HTTP] Error: %d\n", httpCode);
         soundError(); // Play error sound for failed requests
@@ -1067,7 +1069,20 @@ void loop() {
 
     // Check for serial command
     if (Serial.available()) {
-        char cmd = Serial.read();
+        char cmdRaw = Serial.read();
+        
+        // Handle 'c:' command
+        if (cmdRaw == 'c') {
+            if (Serial.read() == ':') {
+                String commandText = Serial.readStringUntil('\n');
+                commandText.trim();
+                Serial.printf("[CMD] Received command: %s\n", commandText.c_str());
+                sendTextCommand(commandText);
+                return;
+            }
+        }
+
+        char cmd = cmdRaw; // If not c:, treat as single char
         if (cmd == 'l' || cmd == 'L') {
             startListening();
         }

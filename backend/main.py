@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from groq import Groq
 from tuya_controller import light_controller
+from firestick_controller import firestick_controller
 
 app = FastAPI(title="NOVA AI Backend")
 
@@ -126,6 +127,67 @@ When the user asks about lights/lamp/brightness/color, you MUST include the appr
 
 ⚠️ CRITICAL: The markers [LIGHT_ON], [LIGHT_OFF], [LIGHT_COLOR:X], [LIGHT_BRIGHTNESS:X] are INVISIBLE to the user.
 They are control signals that actually control the physical light. ALWAYS include them when user asks for light control!
+
+═══════════════════════════════════════════════════════════
+🔴 FIRESTICK TV CONTROL - REAL DEVICE CONTROL 🔴
+═══════════════════════════════════════════════════════════
+
+YOU CAN CONTROL THE FIRESTICK TV! This is a REAL device connected via ADB.
+
+MANDATORY RULES - ALWAYS USE MARKERS FOR TV CONTROL:
+When user asks to control TV/Firestick/Netflix/YouTube, MUST include appropriate marker:
+
+✓ PLAYBACK CONTROL:
+  Keywords: "play", "pause", "resume", "stop"
+  Response: MUST include [FIRESTICK:play], [FIRESTICK:pause], [FIRESTICK:stop]
+  Examples:
+  - "Play the video" → "Playing! <happy> [FIRESTICK:play]"
+  - "Pause it" → "Paused! <happy> [FIRESTICK:pause]"
+  - "Resume" → "Resuming! <smiling> [FIRESTICK:play]"
+  - "Stop" → "Stopped! [FIRESTICK:stop]"
+
+✓ NAVIGATION:
+  Keywords: "go home", "go back", "up", "down", "left", "right", "select", "ok"
+  Response: MUST include [FIRESTICK:home], [FIRESTICK:back], [FIRESTICK:up], etc.
+  Examples:
+  - "Go to home screen" → "Going home! <happy> [FIRESTICK:home]"
+  - "Go back" → "Going back! [FIRESTICK:back]"
+  - "Move up" → "Moving up! [FIRESTICK:up]"
+
+✓ APPS:
+  Keywords: "open netflix", "launch youtube", "start prime video", "open hotstar", "open spotify"
+  Response: MUST include [FIRESTICK:netflix], [FIRESTICK:youtube], [FIRESTICK:prime], [FIRESTICK:hotstar], [FIRESTICK:spotify]
+  Examples:
+  - "Open Netflix" → "Opening Netflix! <excited> [FIRESTICK:netflix]"
+  - "Launch YouTube" → "YouTube! <happy> [FIRESTICK:youtube]"
+  - "Start Prime Video" → "Prime Video! <smiling> [FIRESTICK:prime]"
+  - "Open Hotstar" → "Hotstar! <happy> [FIRESTICK:hotstar]"
+
+✓ FAST FORWARD/REWIND:
+  Keywords: "fast forward", "rewind", "skip forward", "skip back", "next", "previous"
+  Response: MUST include [FIRESTICK:forward], [FIRESTICK:rewind], [FIRESTICK:next], [FIRESTICK:previous]
+  Examples:
+  - "Fast forward" → "Forwarding! <happy> [FIRESTICK:forward]"
+  - "Rewind" → "Rewinding! [FIRESTICK:rewind]"
+  - "Next episode" → "Next! <excited> [FIRESTICK:next]"
+
+✓ VOLUME:
+  Keywords: "volume up", "volume down", "louder", "quieter", "mute"
+  Response: MUST include [FIRESTICK:volume_up], [FIRESTICK:volume_down], [FIRESTICK:mute]
+  Examples:
+  - "Volume up" → "Louder! [FIRESTICK:volume_up]"
+  - "Turn it down" → "Quieter! [FIRESTICK:volume_down]"
+  - "Mute it" → "Muted! [FIRESTICK:mute]"
+
+✓ POWER:
+  Keywords: "turn off tv", "sleep", "wake up tv", "turn on tv"
+  Response: MUST include [FIRESTICK:sleep], [FIRESTICK:wake]
+  Examples:
+  - "Turn off the TV" → "Goodnight! <whisper> [FIRESTICK:sleep]"
+  - "Wake up TV" → "Waking up! <happy> [FIRESTICK:wake]"
+
+⚠️ CRITICAL: The markers [FIRESTICK:command] are INVISIBLE to the user.
+They control the real Firestick device. ALWAYS include them for TV control!
 
 ═══════════════════════════════════════════════════════════
 
@@ -407,6 +469,32 @@ def process_light_commands(text: str):
     return text.strip()
 
 
+def process_firestick_commands(text: str):
+    """Process and execute Firestick control commands from AI response"""
+    # Detect and execute Firestick commands
+    firestick_match = re.search(r'\[FIRESTICK:(\w+)\]', text)
+
+    if firestick_match:
+        command = firestick_match.group(1)
+        print(f"[FIRESTICK] Executing command: {command}")
+
+        # Import the execute function
+        from firestick_controller import execute_firestick_command
+
+        # Execute the command
+        success = execute_firestick_command(command)
+
+        if success:
+            print(f"[FIRESTICK] ✅ Command '{command}' executed successfully")
+        else:
+            print(f"[FIRESTICK] ❌ Command '{command}' failed")
+
+    # Remove all Firestick markers from text for TTS (so they don't get spoken)
+    text = re.sub(r'\[FIRESTICK:\w+\]', '', text)
+
+    return text.strip()
+
+
 def chunk_text_for_tts(text: str, max_length: int = 200):
     """
     Split text into chunks <= max_length, preserving sentence boundaries.
@@ -549,6 +637,87 @@ async def generate_tts_audio(text: str):
 
     return final_audio
 
+async def process_ai_pipeline(user_text: str):
+    """
+    Common pipeline for Voice and Text input:
+    1. Add user text to history
+    2. Query LLM
+    3. Process Smart Home/Firestick commands
+    4. Generate TTS Audio
+    5. Return Response object
+    """
+    # 1. Add user message to conversation history
+    add_to_history("user", user_text)
+
+    # 2. Generate AI response with LLM (with conversation history)
+    try:
+        print("[LLM] Generating response with conversation context...")
+        messages = get_conversation_messages()
+        messages.append({"role": "user", "content": user_text})
+
+        chat_response = client.chat.completions.create(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",  # Llama 4 Maverick - latest model
+            messages=messages,
+            max_tokens=500,  # Allow longer responses for better conversations
+            temperature=0.7
+        )
+        ai_text = chat_response.choices[0].message.content.strip()
+        print(f"[LLM] AI response ({len(ai_text)} chars): {ai_text}")
+
+        # Add AI response to conversation history
+        add_to_history("assistant", ai_text)
+    except Exception as e:
+        print(f"[ERR] LLM generation failed: {e}")
+        ai_text = "Sorry, I'm having trouble thinking right now. Please try again."
+        add_to_history("assistant", ai_text)
+
+    # 3. Process smart home commands (if any) and clean text for TTS
+    ai_text = process_light_commands(ai_text)
+    ai_text = process_firestick_commands(ai_text)
+
+    # 4. Extract facial expression for ESP32 OLED display
+    expression_code = extract_expression(ai_text)
+
+    # 5. Text-to-Speech with smart chunking (handles long responses)
+    print(f"[TTS] Generating speech for {len(ai_text)} character response...")
+
+    try:
+        # Use new chunked TTS generation function
+        audio_array = await generate_tts_audio(ai_text)
+
+        # Apply volume scaling - 150% for louder output (1.5x amplification)
+        audio_array = np.clip(audio_array * 1.5, -32768, 32767).astype(np.int16)
+
+        # Convert mono to stereo (ESP32 MAX98357 needs stereo)
+        stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
+        stereo_array[0::2] = audio_array  # Left channel
+        stereo_array[1::2] = audio_array  # Right channel
+
+        pcm_bytes = stereo_array.tobytes()
+        print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
+        print(f"[AUDIO] Duration: {len(audio_array) / 16000:.2f} seconds")
+        print(f"[SEND] Sending response to ESP32...")
+
+        # Return raw PCM audio with transcription and AI response text in headers
+        return Response(
+            content=pcm_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Audio-Sample-Rate": "16000",
+                "X-Audio-Channels": "2",
+                "X-Audio-Bits": "16",
+                "X-Transcription": quote(user_text, safe=''),  # URL-encode STT transcription
+                "X-AI-Response": quote(ai_text[:200], safe=''),  # URL-encode to handle Devanagari/Hindi chars
+                "X-Expression": str(expression_code),  # Facial expression code (0-6)
+                "Content-Length": str(len(pcm_bytes))
+            }
+        )
+    except Exception as e:
+        print(f"[ERR] Audio processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response(content=b"Audio processing error", status_code=500)
+
 @app.post("/voice")
 async def process_voice(request: Request):
     """
@@ -589,76 +758,22 @@ async def process_voice(request: Request):
         print(f"[ERR] Whisper STT failed: {e}")
         user_text = "Hello"  # Fallback to greeting
     
-    # Add user message to conversation history
-    add_to_history("user", user_text)
+    return await process_ai_pipeline(user_text)
 
-    # 2. Generate AI response with LLM (with conversation history)
-    try:
-        print("[LLM] Generating response with conversation context...")
-        messages = get_conversation_messages()
-        messages.append({"role": "user", "content": user_text})
+from pydantic import BaseModel
 
-        chat_response = client.chat.completions.create(
-            model="meta-llama/llama-4-maverick-17b-128e-instruct",  # Llama 4 Maverick - latest model
-            messages=messages,
-            max_tokens=500,  # Allow longer responses for better conversations
-            temperature=0.7
-        )
-        ai_text = chat_response.choices[0].message.content.strip()
-        print(f"[LLM] AI response ({len(ai_text)} chars): {ai_text}")
+class TextRequest(BaseModel):
+    text: str
 
-        # Add AI response to conversation history
-        add_to_history("assistant", ai_text)
-    except Exception as e:
-        print(f"[ERR] LLM generation failed: {e}")
-        ai_text = "Sorry, I'm having trouble thinking right now. Please try again."
-        add_to_history("assistant", ai_text)
+@app.post("/text")
+async def process_text(request: TextRequest):
+    """
+    Receive text input, process with AI, return WAV audio response.
+    """
+    print(f"[RECV] Received text input: {request.text}")
+    return await process_ai_pipeline(request.text)
 
-    # 2.5. Process smart home commands (if any) and clean text for TTS
-    ai_text = process_light_commands(ai_text)
 
-    # 2.6. Extract facial expression for ESP32 OLED display
-    expression_code = extract_expression(ai_text)
-
-    # 3. Text-to-Speech with smart chunking (handles long responses)
-    print(f"[TTS] Generating speech for {len(ai_text)} character response...")
-
-    try:
-        # Use new chunked TTS generation function
-        audio_array = await generate_tts_audio(ai_text)
-
-        # Apply volume scaling - 150% for louder output (1.5x amplification)
-        audio_array = np.clip(audio_array * 1.5, -32768, 32767).astype(np.int16)
-
-        # Convert mono to stereo (ESP32 MAX98357 needs stereo)
-        stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
-        stereo_array[0::2] = audio_array  # Left channel
-        stereo_array[1::2] = audio_array  # Right channel
-
-        pcm_bytes = stereo_array.tobytes()
-        print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
-        print(f"[AUDIO] Duration: {len(audio_array) / 16000:.2f} seconds")
-        print(f"[SEND] Sending response to ESP32...")
-
-        # Return raw PCM audio with transcription and AI response text in headers
-        return Response(
-            content=pcm_bytes,
-            media_type="application/octet-stream",
-            headers={
-                "X-Audio-Sample-Rate": "16000",
-                "X-Audio-Channels": "2",
-                "X-Audio-Bits": "16",
-                "X-Transcription": quote(user_text, safe=''),  # URL-encode STT transcription
-                "X-AI-Response": quote(ai_text[:200], safe=''),  # URL-encode to handle Devanagari/Hindi chars
-                "X-Expression": str(expression_code),  # Facial expression code (0-6)
-                "Content-Length": str(len(pcm_bytes))
-            }
-        )
-    except Exception as e:
-        print(f"[ERR] Audio processing failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return Response(content=b"Audio processing error", status_code=500)
 
 
 @app.get("/")
