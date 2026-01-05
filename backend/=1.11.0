@@ -1,0 +1,16 @@
+Defaulting to user installation because normal site-packages is not writeable
+WARNING: Ignoring invalid distribution ~ci (C:\Users\Mr Raj\AppData\Roaming\Python\Python313\site-packages)
+Collecting scipy
+  Downloading scipy-1.16.3-cp313-cp313-win_amd64.whl.metadata (60 kB)
+Requirement already satisfied: numpy<2.6,>=1.25.2 in c:\users\mr raj\appdata\roaming\python\python313\site-packages (from scipy) (2.2.6)
+Downloading scipy-1.16.3-cp313-cp313-win_amd64.whl (38.5 MB)
+   ---------------------------------------- 38.5/38.5 MB 3.5 MB/s eta 0:00:00
+WARNING: Ignoring invalid distribution ~ci (C:\Users\Mr Raj\AppData\Roaming\Python\Python313\site-packages)
+Installing collected packages: scipy
+WARNING: Ignoring invalid distribution ~ci (C:\Users\Mr Raj\AppData\Roaming\Python\Python313\site-packages)
+Successfully installed scipy-1.16.3
+WARNING: Ignoring invalid distribution ~ci (C:\Users\Mr Raj\AppData\Roaming\Python\Python313\site-packages)
+WARNING: Ignoring invalid distribution ~ci (C:\Users\Mr Raj\AppData\Roaming\Python\Python313\site-packages)
+
+[notice] A new release of pip is available: 25.1.1 -> 25.3
+[notice] To update, run: python.exe -m pip install --upgrade pip

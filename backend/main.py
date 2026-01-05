@@ -611,14 +611,31 @@ async def generate_tts_audio(text: str):
         # Load WAV into Pydub
         try:
             audio_segment = AudioSegment.from_wav(io.BytesIO(wav_bytes))
-            
-            # FORCE 16kHz MONO (Crucial for ESP32)
-            audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
-            
-            # Export raw PCM data (16-bit signed integer)
-            audio_array = np.array(audio_segment.get_array_of_samples(), dtype=np.int16)
-            
-            print(f"[TTS] Chunk {i+1} processed: {len(audio_array)} samples @ 16kHz")
+
+            # CRITICAL: Properly resample from 24kHz (Groq native) to 16kHz
+            # set_frame_rate() doesn't actually resample - it just changes metadata!
+            # We need scipy for proper resampling with interpolation
+
+            # First, get raw samples
+            audio_samples = np.array(audio_segment.get_array_of_samples(), dtype=np.int16)
+            original_rate = audio_segment.frame_rate
+            target_rate = 16000
+
+            if original_rate != target_rate:
+                # Use scipy for proper resampling with interpolation
+                from scipy import signal
+                num_samples_new = int(len(audio_samples) * target_rate / original_rate)
+                audio_array = signal.resample(audio_samples, num_samples_new)
+                audio_array = np.int16(np.clip(audio_array, -32768, 32767))
+                print(f"[TTS] Chunk {i+1} resampled: {original_rate}Hz → {target_rate}Hz ({len(audio_array)} samples)")
+            else:
+                audio_array = audio_samples
+                print(f"[TTS] Chunk {i+1} already {target_rate}Hz ({len(audio_array)} samples)")
+
+            # Ensure mono
+            if audio_segment.channels > 1:
+                audio_array = np.mean([audio_array[j::audio_segment.channels] for j in range(audio_segment.channels)], axis=0).astype(np.int16)
+
             all_audio_arrays.append(audio_array)
 
         except Exception as e:

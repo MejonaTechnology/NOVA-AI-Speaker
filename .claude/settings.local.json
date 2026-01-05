@@ -39,7 +39,10 @@
       "Bash(\"C:\\Users\\Mr Raj\\Downloads\\platform-tools-latest-windows\\platform-tools\\adb.exe\" devices)",
       "Bash(find:*)",
       "Bash(timeout 15 pio device monitor:*)",
-      "Bash(timeout 12 pio device monitor:*)"
+      "Bash(timeout 12 pio device monitor:*)",
+      "Bash(cat:*)",
+      "Bash(set /p GROQ_API_KEY=Enter Groq API key:)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []
