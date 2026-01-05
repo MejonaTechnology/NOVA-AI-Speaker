@@ -195,8 +195,8 @@ void setupSpeaker() {
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 24,   // Increased from 16 for smoother playback
-        .dma_buf_len = 1024,
+        .dma_buf_count = 8,    // Reduced from 24: smaller buffer = faster response + less delay
+        .dma_buf_len = 512,    // Reduced from 1024: smaller chunks = tighter timing control
         .use_apll = false,     // APLL DISABLED - fixes slow/fast playback speed issues
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
@@ -762,7 +762,7 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     isPlaying = true;
     setLedColor(50, 0, 200); // Purple
 
-        const size_t chunkSize = 2048; // Smaller chunks for smoother streaming
+        const size_t chunkSize = 1024; // Tiny chunks for tight timing control (64ms @ 16kHz)
         uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
         uint8_t* stereoChunk = (uint8_t*)malloc(chunkSize * 2); // Buffer for stereo expansion
 

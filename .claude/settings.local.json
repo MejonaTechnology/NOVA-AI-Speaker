@@ -38,7 +38,8 @@
       "Bash(netsh advfirewall firewall add:*)",
       "Bash(\"C:\\Users\\Mr Raj\\Downloads\\platform-tools-latest-windows\\platform-tools\\adb.exe\" devices)",
       "Bash(find:*)",
-      "Bash(timeout 15 pio device monitor:*)"
+      "Bash(timeout 15 pio device monitor:*)",
+      "Bash(timeout 12 pio device monitor:*)"
     ],
     "deny": [],
     "ask": []
