@@ -607,28 +607,26 @@ async def generate_tts_audio(text: str):
             wav_bytes = wav_buffer.read()
             print(f"[TTS] Edge TTS succeeded for chunk {i+1}")
 
-        # Parse WAV to get audio array
-        wav_buffer = io.BytesIO(wav_bytes)
-        with wave.open(wav_buffer, 'rb') as wav_file:
-            orig_rate = wav_file.getframerate()
-            orig_channels = wav_file.getnchannels()
-            pcm_data = wav_file.readframes(wav_file.getnframes())
 
-        # Convert to numpy array
-        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+        # Load WAV into Pydub
+        try:
+            audio_segment = AudioSegment.from_wav(io.BytesIO(wav_bytes))
+            
+            # FORCE 16kHz MONO (Crucial for ESP32)
+            audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+            
+            # Export raw PCM data (16-bit signed integer)
+            audio_array = np.array(audio_segment.get_array_of_samples(), dtype=np.int16)
+            
+            print(f"[TTS] Chunk {i+1} processed: {len(audio_array)} samples @ 16kHz")
+            all_audio_arrays.append(audio_array)
 
-        # Convert stereo to mono if needed
-        if orig_channels == 2:
-            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
+        except Exception as e:
+            print(f"[ERR] Failed to process audio chunk {i+1}: {e}")
+            continue
 
-        # Resample to 16kHz if needed
-        if orig_rate != 16000:
-            num_samples = int(len(audio_array) * 16000 / orig_rate)
-            indices = np.linspace(0, len(audio_array) - 1, num_samples)
-            audio_array = np.interp(indices, np.arange(len(audio_array)), audio_array).astype(np.int16)
-            print(f"[TTS] Chunk {i+1} resampled from {orig_rate}Hz to 16kHz")
-
-        all_audio_arrays.append(audio_array)
+    if not all_audio_arrays:
+        return np.array([], dtype=np.int16)
 
     # Concatenate all chunks
     final_audio = np.concatenate(all_audio_arrays)
@@ -685,16 +683,14 @@ async def process_ai_pipeline(user_text: str):
         # Use new chunked TTS generation function
         audio_array = await generate_tts_audio(ai_text)
 
-        # Apply volume scaling - 150% for louder output (1.5x amplification)
-        audio_array = np.clip(audio_array * 1.5, -32768, 32767).astype(np.int16)
+        # No volume boost to prevent clipping/distortion
+        audio_array = np.clip(audio_array * 1.0, -32768, 32767).astype(np.int16)
 
-        # Convert mono to stereo (ESP32 MAX98357 needs stereo)
-        stereo_array = np.empty(len(audio_array) * 2, dtype=np.int16)
-        stereo_array[0::2] = audio_array  # Left channel
-        stereo_array[1::2] = audio_array  # Right channel
-
-        pcm_bytes = stereo_array.tobytes()
-        print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, stereo)")
+        # Send MONO audio directly to save bandwidth (50% reduction)
+        # ESP32 will handle mono-to-stereo duplication for I2S
+        pcm_bytes = audio_array.tobytes()
+        
+        print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, MONO)")
         print(f"[AUDIO] Duration: {len(audio_array) / 16000:.2f} seconds")
         print(f"[SEND] Sending response to ESP32...")
 
@@ -704,10 +700,8 @@ async def process_ai_pipeline(user_text: str):
             media_type="application/octet-stream",
             headers={
                 "X-Audio-Sample-Rate": "16000",
-                "X-Audio-Channels": "2",
+                "X-Audio-Channels": "1", # Changed to 1 channel
                 "X-Audio-Bits": "16",
-                "X-Transcription": quote(user_text, safe=''),  # URL-encode STT transcription
-                "X-AI-Response": quote(ai_text[:200], safe=''),  # URL-encode to handle Devanagari/Hindi chars
                 "X-Expression": str(expression_code),  # Facial expression code (0-6)
                 "Content-Length": str(len(pcm_bytes))
             }

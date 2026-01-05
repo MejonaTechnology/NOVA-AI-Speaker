@@ -32,7 +32,13 @@
       "Bash(xcopy:*)",
       "WebFetch(domain:docs.edgeimpulse.com)",
       "Bash(timeout 30 python:*)",
-      "Bash(md5sum:*)"
+      "Bash(md5sum:*)",
+      "Bash(adb version:*)",
+      "Bash(\"C:\\Users\\Mr Raj\\Downloads\\platform-tools-latest-windows\\platform-tools\\adb.exe\" connect 192.168.31.165:5555)",
+      "Bash(netsh advfirewall firewall add:*)",
+      "Bash(\"C:\\Users\\Mr Raj\\Downloads\\platform-tools-latest-windows\\platform-tools\\adb.exe\" devices)",
+      "Bash(find:*)",
+      "Bash(timeout 15 pio device monitor:*)"
     ],
     "deny": [],
     "ask": []

@@ -12,6 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Speaker**: MAX98357A I2S amplifier
 - **Visual Feedback**: WS2812B RGB LED (NeoPixel)
 - **Wake Word**: Edge Impulse ML model for on-device detection
+- **Control**: GPIO 4 mute button with 3s press for power-off
 
 ### System Architecture
 
@@ -24,64 +25,67 @@ ESP32-S3 (Firmware)
 Backend (nova.mejona.com:80)
     ↓ Nginx Proxy → FastAPI (port 8000) or Go (port 8001)
     ↓ Groq Whisper (STT)
-    ↓ Groq Llama 3.3 70B (LLM)
-    ↓ Groq Orpheus v1 (TTS) with gTTS fallback
-    ↓ Returns PCM audio (16kHz, 16-bit)
+    ↓ Groq Llama 4 Maverick 17B (LLM) - latest conversational AI
+    ↓ Groq Orpheus v1 (TTS) with edge-tts and gTTS fallback
+    ↓ Returns PCM audio (16kHz, 16-bit, stereo)
     ↓
 ESP32-S3 plays response through I2S speaker
 ```
+
+## Quick Start
+
+### First Time Setup
+1. **Firmware Build**: `pio run` (builds for `esp32s3` environment)
+2. **Backend Setup**: `cd backend && pip install -r requirements.txt`
+3. **Environment Config**: Create `backend/.env` with `GROQ_API_KEY`, `TUYA_ACCESS_ID`, `TUYA_ACCESS_SECRET`
+4. **Device Upload**: `pio run --target upload` and monitor with `pio device monitor`
+
+### Key Files to Know
+- **Main Firmware**: `src/main.cpp` (41KB, ~1500 lines - wake word detection loop and I2S audio)
+- **Hardware Config**: `src/config.h` (pin definitions and settings)
+- **Backend Server**: `backend/main.py` (31KB - FastAPI voice endpoint)
+- **Tuya Integration**: `backend/tuya_controller.py` (smart light control)
+- **Firestick Control**: `backend/firestick_controller.py` (ADB-based TV control)
 
 ## Development Commands
 
 ### ESP32 Firmware (PlatformIO)
 
 ```bash
-# Build firmware
-pio run
+# Standard workflow
+pio run                           # Build firmware
+pio run --target upload           # Upload to device
+pio device monitor                # Monitor serial output (115200 baud)
+pio run --target clean            # Clean build artifacts
 
-# Upload to ESP32-S3
-pio run --target upload
-
-# Monitor serial output
-pio device monitor
-
-# Clean build
-pio run --target clean
-
-# Build + Upload + Monitor (full workflow)
-pio run --target upload && pio device monitor
+# Combined operations
+pio run --target upload && pio device monitor    # Upload + Monitor
+pio run --target clean && pio run --target upload && pio device monitor  # Full rebuild
 ```
 
 **Important PlatformIO Notes:**
 - Board: `esp32-s3-devkitc-1` with 16MB flash
 - Framework: Arduino for ESP32
-- Monitor baud: 115200
-- Upload speed: 921600
+- Monitor baud: 115200, Upload speed: 921600
 - PSRAM enabled with cache fix (`-mfix-esp32-psram-cache-issue`)
 - Partition: `huge_app.csv` for large firmware with Edge Impulse model
+- Environment: `esp32s3` (standard upload) or `esp32s3-ota` (wireless OTA)
 
 ### Python Backend (FastAPI)
 
 ```bash
 cd backend
 
-# Install dependencies
+# Development
 pip install -r requirements.txt
-
-# Set environment variable
 export GROQ_API_KEY="your-groq-api-key"
-
-# Run development server
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-# Docker build and run
-docker build -t nova-ai-backend .
-docker run -p 8000:8000 --env-file .env nova-ai-backend
-
-# Docker Compose
-docker-compose up -d
-docker-compose logs -f
-docker-compose down
+# Docker
+docker-compose up -d                # Start with docker-compose
+docker-compose logs -f              # View logs
+docker-compose down                 # Stop services
+docker build -t nova-ai-backend .   # Manual build (no cache)
 ```
 
 ### Go Backend (Alternative Implementation)
@@ -89,19 +93,50 @@ docker-compose down
 ```bash
 cd backend-go
 
-# Install dependencies
 go mod download
-
-# Run development server
 go run main.go
-
-# Build binary
 go build -o nova-ai-backend
-
-# Docker build
 docker build -t nova-ai-backend-go .
 docker run -p 8001:8001 --env-file .env nova-ai-backend-go
 ```
+
+## Testing & Validation
+
+### Backend Testing
+
+```bash
+cd backend
+
+# Test Tuya smart light integration
+python test_tuya.py                 # Test API connectivity and commands
+python test_tuya_curl.py            # CURL-based Tuya API testing
+
+# Test AI marker generation (for light control)
+python test_ai_prompt.py            # Verify [LIGHT_ON], [LIGHT_COLOR:*] markers
+
+# Test Firestick TV control
+python test_firestick.py            # ADB connection and control commands
+
+# Test backend light control end-to-end
+python test_backend_light.py        # Backend integration test
+./test_backend_light.sh             # Shell wrapper for testing
+
+# Manual endpoint testing (local server)
+ffmpeg -f alsa -i hw:0 -t 3 -ar 16000 -ac 1 -f s16le test.pcm
+curl -X POST http://localhost:8000/voice --data-binary @test.pcm --output response.pcm
+ffplay -f s16le -ar 16000 -ac 1 response.pcm
+```
+
+### Firmware Debugging
+
+**Serial Monitor Output Format**:
+- `[WIFI]` - WiFi connection status
+- `[MIC]` - Microphone initialization and audio levels
+- `[SPK]` - Speaker initialization and playback
+- `[WAKE]` - Wake word detection events and confidence scores
+- `[REC]` - Audio recording duration and silence detection
+- `[HTTP]` - Backend requests and responses
+- `[PLAY]` - Audio streaming and playback progress
 
 ## Configuration
 
@@ -127,13 +162,19 @@ docker run -p 8001:8001 --env-file .env nova-ai-backend-go
 - **RGB LED**: GPIO 48
 - **Mute Button**: GPIO 4
 
-**Audio Settings:**
-- Sample Rate: 16kHz (both recording and playback)
+**Audio Settings**:
+- Sample Rate: 16kHz (required for Groq APIs and Edge Impulse model)
 - Bit Depth: 16-bit PCM
-- Recording Duration: 3 seconds
-- Wake Word Confidence: 0.75 (75%)
-- Confidence Gap: 0.20 (20% higher than noise/unknown)
-- Consecutive Detections: 1 (responsive triggering)
+- Max Recording: 30 seconds (auto-stops on silence)
+- **Wake Word Detection** (lines 14-20 in main.cpp):
+  - Confidence: 0.92 (92% threshold - strict to prevent false triggers)
+  - Confidence Gap: 0.30 (30% - Nova must exceed noise/unknown by 30%)
+  - Consecutive Detections: 1 (responsive, single detection triggers)
+  - Noise Gate: 200 (minimum audio level to process)
+- **Silence Detection**:
+  - Threshold: 200 (audio level for silence, accounts for background noise)
+  - Duration: 1000ms (1 second of silence stops recording)
+  - Minimum Recording: 1500ms (1.5 seconds minimum for transcription accuracy)
 
 ### Backend Environment Variables (`.env`)
 
@@ -145,15 +186,21 @@ TUYA_ACCESS_SECRET=your_tuya_access_secret
 ```
 
 **Groq API Services Used:**
-- **STT**: `whisper-large-v3-turbo` (16kHz audio)
-- **LLM**: `llama-3.3-70b-versatile` (conversational AI)
-- **TTS**: `canopylabs/orpheus-v1-english` (voice: diana - female, natural)
-- **Fallback TTS**: Edge TTS (Microsoft Azure TTS, free alternative)
+- **STT**: `whisper-large-v3-turbo` (16kHz audio transcription)
+- **LLM**: `meta-llama/llama-4-maverick-17b-128e-instruct` (Llama 4 Maverick - latest conversational AI)
+- **TTS**: `canopylabs/orpheus-v1-english` (voice: autumn - female, natural Indian accent)
+- **Fallback TTS**: Google gTTS (free text-to-speech alternative)
 
 **Tuya Smart Home Integration:**
 - Controls smart lights via Tuya Cloud API
 - Automatic token refresh every 90 minutes
 - Device ID configured in `backend/tuya_controller.py`
+
+**Firestick TV Control:**
+- Controls Amazon Firestick via ADB (Android Debug Bridge)
+- Requires ADB debugging enabled on Firestick
+- Firestick IP configured in `backend/firestick_controller.py`
+- Supports playback, navigation, app launching, volume, and power control
 
 ## Architecture Details
 
@@ -310,6 +357,17 @@ backend/
 └── test_ai_prompt.py     # AI marker generation testing
 ```
 
+### Firestick TV Control (`backend/firestick_controller.py`)
+```
+backend/
+├── firestick_controller.py    # Firestick ADB integration
+│   ├── FirestickController class (ADB connection and commands)
+│   ├── execute_firestick_command() helper function
+│   └── Support for playback, navigation, apps, volume, power
+├── test_firestick.py          # Firestick testing script
+└── FIRESTICK_SETUP.md         # Complete setup guide
+```
+
 ## Development Notes
 
 ### ESP32 Memory Considerations
@@ -355,13 +413,23 @@ Critical settings in `src/main.cpp` (lines 348-380):
 ### Common Development Tasks
 
 **Changing Wake Word**:
-1. Train new model on Edge Impulse platform
-2. Export for Arduino
-3. Replace `lib/ei-wake-word/` with new library
-4. Adjust `WAKE_WORD_CONFIDENCE` if needed
+1. Train new model on Edge Impulse platform with your audio samples
+2. Export C++ library for Arduino ESP32
+3. Replace `lib/ei-wake-word/test-new_inferencing/` directory
+4. Update `WAKE_WORD_CONFIDENCE` threshold in `src/main.cpp` (line 16, currently 0.92)
+5. Rebuild and test: `pio run --target upload && pio device monitor`
 
-**Modifying AI Personality**:
-Edit `SYSTEM_PROMPT` in `backend/main.py` (Python) or `backend-go/main.go` (Go)
+**Modifying AI Personality** (Hinglish girlfriend assistant):
+- Edit `SYSTEM_PROMPT` in `backend/main.py` lines 50-120
+- Add emotion tags like `<giggle>`, `<think>`, `<sigh>` for TTS expression
+- Keep responses concise (1-2 sentences) for faster playback
+- Test with: `python test_ai_prompt.py` to verify output format
+
+**Adding Light Control Commands**:
+1. AI must generate `[LIGHT_ON]`, `[LIGHT_OFF]`, `[LIGHT_COLOR:*]`, `[LIGHT_BRIGHTNESS:*]` markers
+2. Backend main.py extracts markers and calls `light_controller.execute_command()`
+3. Tuya API converts to actual device commands
+4. Test: `python test_ai_prompt.py` then `python test_backend_light.py`
 
 **Testing Tuya Light Control**:
 ```bash
@@ -384,6 +452,40 @@ python test_ai_prompt.py
 - "Turn on blue light" → `[LIGHT_ON] [LIGHT_COLOR:blue]`
 - Supported colors: red, blue, green, purple, pink, yellow, orange, cyan, white, warm, cool
 
+**Testing Firestick TV Control**:
+```bash
+cd backend
+
+# Install ADB first (if not already installed)
+# Windows: Download platform tools from developer.android.com
+# Linux: sudo apt install adb
+
+# Configure Firestick IP in firestick_controller.py
+# Edit line ~264: FIRESTICK_IP = "192.168.1.100"
+
+# Enable ADB debugging on Firestick:
+# Settings → My Fire TV → Developer Options → ADB Debugging
+
+# Test connection
+python test_firestick.py
+
+# Expected output:
+# ✅ PASS: Connected to Firestick successfully
+# ✅ PASS: Navigation, Playback, Apps, Volume tests
+```
+
+**Firestick Control Commands** (voice commands):
+- "Open Netflix" → `[FIRESTICK:netflix]`
+- "Launch YouTube" → `[FIRESTICK:youtube]`
+- "Play" / "Resume" → `[FIRESTICK:play]`
+- "Pause" → `[FIRESTICK:pause]`
+- "Go home" → `[FIRESTICK:home]`
+- "Go back" → `[FIRESTICK:back]`
+- "Volume up" → `[FIRESTICK:volume_up]`
+- "Mute" → `[FIRESTICK:mute]`
+- "Turn off TV" → `[FIRESTICK:sleep]`
+- See `backend/FIRESTICK_SETUP.md` for complete command list
+
 **Testing Backend Locally**:
 ```bash
 # Record 3s test audio
@@ -400,6 +502,48 @@ ffplay -f s16le -ar 16000 -ac 1 response.pcm
 
 **Updating Firmware OTA**:
 Currently uses USB upload. For OTA updates, add ESP32 OTA library and implement update endpoint.
+
+## Recent Fixes & Known Improvements
+
+### Critical Issues Resolved (Recent Commits)
+
+**Audio Playback** (commit d00e2fa):
+- ✅ Fixed 2x playback speed issue: APLL disabled for speaker (`use_apll = false`)
+- ✅ Fixed silence detection causing premature recording stops
+- ✅ Removed 3x microphone gain for better natural quality
+
+**Wake Word Detection** (commit 95a85aa, 98ad2e6):
+- ✅ Changed to single detection (1 consecutive detection) for responsiveness
+- ✅ Increased confidence threshold to 0.92 to prevent false triggers
+- ✅ Model is poorly trained → strict thresholds compensate for this
+
+**Backend Services** (commit 0cf0222):
+- ✅ Switched to Llama 4 Maverick 17B for latest conversational AI
+- ✅ Implemented automatic Groq rate limit handling
+- ✅ Added gTTS/edge-tts fallback for TTS
+
+**Dependencies** (commit 97c55d0):
+- ✅ Pinned numpy<2 to prevent breaking changes
+- ✅ Added adbutils for Firestick control
+- ✅ Installed platform-tools for ADB on Windows
+
+### Current Implementation Status
+
+**✅ Fully Working**:
+- Wake word detection ("Hey Nova") with LED feedback
+- Voice recording with automatic silence detection
+- Groq STT/LLM/TTS pipeline
+- Tuya smart light control with [LIGHT_*] markers
+- Firestick TV control with [FIRESTICK:*] markers
+- Conversation history (6 exchanges max)
+- Audio streaming without buffering issues
+- WiFi reconnection with optimized power settings
+
+**⚠️ Known Limitations**:
+- Wake word model is poorly trained (requires strict thresholds)
+- OTA firmware updates not yet implemented (USB upload only)
+- Go backend included but not actively maintained (Python is primary)
+- Single device context (no multi-user support)
 
 ## Performance Characteristics
 
@@ -448,18 +592,45 @@ Currently uses USB upload. For OTA updates, add ESP32 OTA library and implement 
 - Verify AI is generating markers with `python backend/test_ai_prompt.py`
 - Check device ID matches in `backend/tuya_controller.py`
 
+**"Firestick control not working"**:
+- Verify ADB is installed: `adb version`
+- Check Firestick IP is correct in `backend/firestick_controller.py`
+- Enable ADB debugging on Firestick (Settings → My Fire TV → Developer Options)
+- Test connection: `adb connect FIRESTICK_IP:5555`
+- Check backend logs for `[FIRESTICK]` messages
+- Test Firestick API with `python backend/test_firestick.py`
+- Ensure Firestick and server are on same network
+- Firewall may block ADB port 5555 (temporarily disable to test)
+- Restart Firestick if connection fails persistently
+
 ## Git Workflow
 
-Recent commits show the project uses:
-- Descriptive commit messages with type prefixes: `fix(audio):`, `feat:`, etc.
-- Domain naming migration (localhost → nova.mejona.com)
-- Sample rate standardization (consolidated to 16kHz)
+### Commit Message Format
 
-When committing:
-- Test firmware builds with `pio run` before commit
-- Verify backend with `uvicorn` or `go run`
-- Include both firmware and backend changes if API contract changed
-- Use conventional commit format: `fix(audio):`, `feat(tuya):`, `docs:`, etc.
+Project uses **conventional commits** with type prefixes:
+- `fix(component):` - Bug fixes (e.g., `fix(audio): Fix silence detection`)
+- `feat(component):` - New features (e.g., `feat(tuya): Add light control`)
+- `docs:` - Documentation updates
+- `refactor(component):` - Code improvements without behavior change
+- `perf:` - Performance optimizations
+
+Components include: `audio`, `wake-word`, `backend`, `wifi`, `tuya`, `firestick`, `ai`
+
+### Before Committing
+
+1. **Firmware Changes**: `pio run` (ensure build succeeds)
+2. **Backend Changes**: Test with `uvicorn main:app --port 8000` locally
+3. **API Contract Changes**: Update both firmware AND backend together
+4. **Testing**: Run relevant test scripts from `backend/test_*.py` suite
+
+### Recent Work Context
+
+Last 5 commits focus on:
+1. **Dependencies Fix** (97c55d0): numpy pinning, adb, firestick path
+2. **Firestick Integration** (72ec3fc): Missing controller dependency
+3. **/text Endpoint** (0360139): ESP32 serial command/volume control
+4. **Wake Word Tuning** (95a85aa): Single detection for responsiveness
+5. **Audio Improvements** (98ad2e6): Flaky model workarounds with strict thresholds
 
 ## Deployment to Production (OCI Server)
 

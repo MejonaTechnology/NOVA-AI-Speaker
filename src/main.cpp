@@ -197,7 +197,7 @@ void setupSpeaker() {
         .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count = 24,   // Increased from 16 for smoother playback
         .dma_buf_len = 1024,
-        .use_apll = false,     // APLL disabled - fixes 2x speed playback issue
+        .use_apll = false,     // APLL DISABLED - fixes slow/fast playback speed issues
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
     };
@@ -670,258 +670,193 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
     return audioBuffer;
 }
 
-// ============== Handle Audio Response for both Voice and Text ==============
-void handleAudioResponse(HTTPClient& http, WiFiClient* stream) {
-    int httpCode = http.GET(); // Not actually GET, just getting status code from previous request object if reused, but here we pass active http object
 
-    // Ideally we assume httpCode is already checked by caller, but we need to do header parsing etc.
-    // Let's refactor: Caller checks 200 OK, then calls this.
-    
-    soundSuccess(); // Play success sound when response received
-    int contentLength = http.getSize();
 
-    // Get STT transcription from custom header (URL-encoded)
-    String transcription = http.header("X-Transcription");
-    if (transcription.length() > 0) {
-        String decodedTranscription = urlDecode(transcription);
-        Serial.println("\n========== YOU SAID ==========");
-        Serial.println(decodedTranscription);
-        Serial.println("==============================\n");
-    }
-
-    // Get AI response text from custom header (URL-encoded)
-    String aiResponse = http.header("X-AI-Response");
-    if (aiResponse.length() > 0) {
-        String decodedResponse = urlDecode(aiResponse);
-        Serial.println("========== AI RESPONSE ==========");
-        Serial.println(decodedResponse);
-        Serial.println("=================================\n");
-    }
-
-    // Get facial expression code from backend (0-6)
-    String expressionHeader = http.header("X-Expression");
-    if (expressionHeader.length() > 0) {
-        int expressionCode = expressionHeader.toInt();
-        Serial.printf("[EXPRESSION] Backend sent expression code: %d\n", expressionCode);
-
-        // Map expression code to emotion enum
-        switch (expressionCode) {
-            case 1: currentEmotion = EMOTION_HAPPY; break;
-            case 2: currentEmotion = EMOTION_CURIOUS; break;
-            case 3: currentEmotion = EMOTION_EXCITED; break;
-            case 4: currentEmotion = EMOTION_SAD; break;
-            case 5: currentEmotion = EMOTION_HAPPY; break;
-            case 6: currentEmotion = EMOTION_SHOCK; break;
-            default: currentEmotion = EMOTION_NORMAL; break;
-        }
-    }
-
-    // Get emotion from backend LLM (fallback)
-    String emotionHeader = http.header("X-Emotion");
-    if (emotionHeader.length() > 0) {
-        currentEmotion = parseEmotionString(emotionHeader);
-        Serial.printf("[EMOTION] Backend sent emotion: %s\n", emotionHeader.c_str());
-    } else {
-        currentEmotion = EMOTION_NORMAL;
-    }
-
-    Serial.printf("[HTTP] Content-Length: %d bytes\n", contentLength);
-
-    // ============================================
-    // OPTIMIZED STREAMING MODE (Play-and-Delete)
-    // ============================================
-    {
-        Serial.println("[STREAM] Starting real-time playback with auto-cleanup...");
-        isPlaying = true;
-        setLedColor(50, 0, 200); // Purple (Speaking)
-
-        const size_t chunkSize = 4096;
-        uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
-
-        if (!audioChunk) {
-            Serial.println("[ERR] Chunk malloc failed!");
-            return;
-        }
-
-        size_t bytesWritten;
-        unsigned long streamStartTime = millis();
-        bool receivedFirstByte = false;
-        size_t totalStreamed = 0;
-        size_t chunksProcessed = 0;
-        bool useContentLength = (contentLength > 0);
-
-        Serial.println("[STREAM] Waiting for audio from backend...");
-
-        unsigned long noDataCount = 0;
-        unsigned long lastProgressPrint = 0;
-
-        while (true) {
-            size_t available = stream->available();
-
-            if (available > 0) {
-                if (!receivedFirstByte) {
-                    Serial.println("[STREAM] Audio started, playing immediately...");
-                    receivedFirstByte = true;
-                }
-
-                int bytesRead = stream->readBytes(audioChunk, min(chunkSize, available));
-                if (bytesRead > 0) {
-                    // VOLUME CONTROL: Apply 50% scaling
-                    int16_t* samples = (int16_t*)audioChunk;
-                    for (int i = 0; i < bytesRead / 2; i++) {
-                        samples[i] = (int16_t)(samples[i] * 0.5f); // 50% volume
-                    }
-
-                    // Write chunk to I2S speaker
-                    i2s_write(SPK_I2S_NUM, audioChunk, bytesRead, &bytesWritten, portMAX_DELAY);
-
-                    memset(audioChunk, 0, bytesRead);
-
-                    totalStreamed += bytesRead;
-                    chunksProcessed++;
-                    noDataCount = 0;
-
-                    if (millis() - lastProgressPrint > 2000 || (totalStreamed % 50000 < chunkSize)) {
-                         if (useContentLength) {
-                            Serial.printf("[STREAM] Playing: %d / %d bytes (%.1f%%)\n",
-                                totalStreamed, contentLength, (float)totalStreamed * 100.0 / contentLength);
-                        } else {
-                            Serial.printf("[STREAM] Playing: %d bytes (%.1f KB)\n", totalStreamed, totalStreamed / 1024.0);
-                        }
-                        lastProgressPrint = millis();
-                    }
-
-                    if (useContentLength && totalStreamed >= contentLength) {
-                        Serial.printf("[STREAM] ✓ All expected data played! (%d bytes)\n", totalStreamed);
-                        break;
-                    }
-                }
-            } else {
-                if (!receivedFirstByte) {
-                    if (millis() - streamStartTime > 30000) {
-                        Serial.println("[ERR] Timeout waiting for backend stream (30s)");
-                        break;
-                    }
-                } else {
-                    noDataCount++;
-                    unsigned long maxWaitChecks = (useContentLength && totalStreamed < contentLength) ? 30000 : 10000;
-                    
-                    if (noDataCount >= maxWaitChecks) {
-                        Serial.println("[STREAM] Stream appears complete (timeout)");
-                        break;
-                    }
-                    
-                    if (!http.connected() && !stream->available()) {
-                         if (useContentLength && totalStreamed < contentLength) {
-                             // Wait more
-                         } else {
-                             if (noDataCount > 3000) break;
-                         }
-                    }
-                }
-                delay(1);
-            }
-        }
-
-        Serial.printf("[STREAM] Total played: %d bytes\n", totalStreamed);
-        free(audioChunk);
-
-        if (totalStreamed > 0) {
-            int dmaBufferBytes = 24 * 1024;
-            int waitMs = (dmaBufferBytes * 1000) / 64000;
-            delay(waitMs + 1500);
-        }
-    }
-
-    i2s_zero_dma_buffer(SPK_I2S_NUM);
-    isPlaying = false;
-    setLedColor(0,0,0);
-    Serial.println("[SPK] Playback complete");
-}
-
-// ============== Send Text Command ==============
-void sendTextCommand(String text) {
-     if (WiFi.status() != WL_CONNECTED) {
+// ============== Helper: Manual HTTP Request for Audio ==============
+void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody = nullptr, size_t audioSize = 0) {
+    if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[HTTP] WiFi not connected!");
         return;
     }
 
-#if USE_HTTPS
-    String url = String("https://") + BACKEND_HOST + "/text";
-    WiFiClientSecure client;
-    client.setInsecure();
-#else
-    String url = String("http://") + BACKEND_HOST + ":" + String(BACKEND_PORT) + "/text";
     WiFiClient client;
-#endif
+    if (!client.connect(BACKEND_HOST, BACKEND_PORT)) {
+        Serial.println("[HTTP] Connection failed!");
+        soundError();
+        return;
+    }
 
-    Serial.printf("[HTTP] Sending text: \"%s\" to %s\n", text.c_str(), url.c_str());
+    Serial.printf("[HTTP] Connected to %s:%d\n", BACKEND_HOST, BACKEND_PORT);
     
-    HTTPClient http;
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/json");
-    http.setTimeout(45000);
-
+    // Construct Manual HTTP/1.0 Request (No Chunking support expected)
+    String method = "POST";
+    String url = endpoint; // already starts with / 
+    
+    client.println(method + " " + url + " HTTP/1.0");
+    client.println("Host: " + String(BACKEND_HOST));
+    client.println("User-Agent: ESP32/NOVA");
+    client.println("Connection: close"); // Vital for HTTP/1.0
+    
+    if (audioBody) {
+        client.println("Content-Type: application/octet-stream");
+        client.println("Content-Length: " + String(audioSize));
+    } else {
+        client.println("Content-Type: application/json");
+        client.println("Content-Length: " + String(jsonBody.length()));
+    }
+    
+    client.println(); // End of headers
+    
+    // Send Body
+    if (audioBody) {
+        client.write(audioBody, audioSize);
+    } else {
+        client.print(jsonBody);
+    }
+    
+    Serial.println("[HTTP] Request sent. Waiting for response...");
     setLedColor(0, 0, 255); // Blue (Processing)
     soundProcessing();
 
-    // Create JSON body
-    String jsonBody = "{\"text\":\"" + text + "\"}";
-    int httpCode = http.POST(jsonBody);
-
-    if (httpCode == HTTP_CODE_OK) {
-        WiFiClient* stream = http.getStreamPtr();
-        handleAudioResponse(http, stream);
-    } else {
-        Serial.printf("[HTTP] Error: %d\n", httpCode);
-        soundError();
-        setLedColor(255, 0, 0); 
-        delay(1000);
-        setLedColor(0, 0, 0);
+    // Read Response Headers
+    long timeout = millis();
+    while (client.available() == 0) {
+        if (millis() - timeout > 45000) {
+            Serial.println("[HTTP] Timeout (45s) waiting for headers!");
+            client.stop();
+            soundError();
+            return;
+        }
+        delay(1);
     }
-    http.end();
+
+    bool headerEnded = false;
+    int contentLength = -1;
+    String line;
+    
+    while(client.connected() || client.available()) {
+        line = client.readStringUntil('\n');
+        // Serial.println(line); // Debug headers if needed
+        
+        if (line.startsWith("Content-Length: ")) {
+            contentLength = line.substring(16).toInt();
+        }
+        
+        if (line == "\r" || line == "") {
+            headerEnded = true;
+            break;
+        }
+    }
+
+    if (!headerEnded) {
+        Serial.println("[HTTP] Invalid response structure!");
+        client.stop();
+        return;
+    }
+
+    Serial.printf("[HTTP] Body start. Content-Length: %d\n", contentLength);
+    
+    // Play Audio Stream
+    soundSuccess(); 
+    Serial.println("[STREAM] Starting playback...");
+    isPlaying = true;
+    setLedColor(50, 0, 200); // Purple
+
+        const size_t chunkSize = 2048; // Smaller chunks for smoother streaming
+        uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
+        uint8_t* stereoChunk = (uint8_t*)malloc(chunkSize * 2); // Buffer for stereo expansion
+
+        if (!audioChunk || !stereoChunk) {
+            Serial.println("[ERR] Chunk malloc failed!");
+            if(audioChunk) free(audioChunk);
+            if(stereoChunk) free(stereoChunk);
+            client.stop();
+            return;
+        }
+
+        size_t totalBytes = 0;
+        size_t bytesWritten;
+        unsigned long lastActivity = millis();
+        
+        // BUFFERING FOR ODD BYTES (Crucial for 16-bit alignment)
+        uint8_t leftoverByte = 0;
+        bool hasLeftover = false;
+
+        while (client.connected() || client.available()) {
+            int avail = client.available();
+            if (avail > 0) {
+                 // Calculate how much space we have. Leave 1 byte space at start if we have leftover.
+                 int readOffset = hasLeftover ? 1 : 0;
+                 int bytesToRead = min((int)chunkSize - readOffset, avail);
+                 
+                 int bytesRead = client.read(audioChunk + readOffset, bytesToRead);
+                 
+                 if (bytesRead > 0) {
+                    if (hasLeftover) {
+                        audioChunk[0] = leftoverByte;
+                        bytesRead += 1; // We added 1 byte
+                        hasLeftover = false;
+                    }
+                    
+                    // Check if we have an odd number of bytes
+                    if (bytesRead % 2 != 0) {
+                        leftoverByte = audioChunk[bytesRead - 1]; // Save last byte
+                        hasLeftover = true;
+                        bytesRead -= 1; // Don't process this byte yet
+                    }
+                    
+                    if (bytesRead > 0) { // If we have complete samples
+                        // Convert Mono to Stereo & Apply Volume
+                        int16_t* monoSamples = (int16_t*)audioChunk;
+                        int16_t* stereoSamples = (int16_t*)stereoChunk;
+                        int sampleCount = bytesRead / 2;
+    
+                        for (int i=0; i<sampleCount; i++) {
+                            // Volume scaling (adjust as needed, 0.8 is safer than 0.5 for low volume issues, but 0.5 is safe for distortion)
+                            int32_t val = (int32_t)monoSamples[i];
+                            val = val * 0.8; // 80% volume
+                            
+                            // Clip to prevent overflow (software limiter)
+                            if (val > 32767) val = 32767;
+                            if (val < -32768) val = -32768;
+    
+                            stereoSamples[i*2] = (int16_t)val;     // Left
+                            stereoSamples[i*2+1] = (int16_t)val;   // Right
+                        }
+                        
+                        i2s_write(SPK_I2S_NUM, stereoChunk, bytesRead * 2, &bytesWritten, portMAX_DELAY);
+                        totalBytes += bytesRead;
+                        lastActivity = millis();
+                    }
+                 }
+            } else {
+                if (millis() - lastActivity > 10000) {
+                    Serial.println("[STREAM] Timeout reading body.");
+                    break;
+                }
+                delay(1);
+            }
+        }
+        
+        free(audioChunk);
+        free(stereoChunk);
+    client.stop();
+    i2s_zero_dma_buffer(SPK_I2S_NUM);
+    isPlaying = false;
+    setLedColor(0,0,0);
+    Serial.printf("[SPK] Playback complete. Total: %d bytes\n", totalBytes);
+}
+
+// ============== Send Text Command ==============
+void sendTextCommand(String text) {
+    String jsonBody = "{\"text\":\"" + text + "\"}";
+    sendAudioRequest("/text", jsonBody);
 }
 
 
 // ============== Send Audio & Play Response ==============
 void sendAndPlay(uint8_t* audioData, size_t audioSize) {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[HTTP] WiFi not connected!");
-        return;
-    }
-    
-#if USE_HTTPS
-    String url = String("https://") + BACKEND_HOST + VOICE_ENDPOINT;
-    WiFiClientSecure client;
-    client.setInsecure();
-#else
-    String url = String("http://") + BACKEND_HOST + ":" + String(BACKEND_PORT) + VOICE_ENDPOINT;
-    WiFiClient client;
-#endif
-    Serial.printf("[HTTP] Sending to %s\n", url.c_str());
-    
-    HTTPClient http;
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/octet-stream");
-    http.setTimeout(45000);  // Increased to 45s for backend processing time
-
-    setLedColor(0, 0, 255); // Blue (Processing)
-    soundProcessing(); // Gentle pulse - thinking sound
-
-    int httpCode = http.POST(audioData, audioSize);
-
-    if (httpCode == HTTP_CODE_OK) {
-        WiFiClient* stream = http.getStreamPtr();
-        handleAudioResponse(http, stream);
-    } else {
-        Serial.printf("[HTTP] Error: %d\n", httpCode);
-        soundError(); // Play error sound for failed requests
-        setLedColor(255, 0, 0); // Red LED for error
-        delay(1000);
-        setLedColor(0, 0, 0); // Turn off LED
-    }
-
-    http.end();
+    sendAudioRequest(VOICE_ENDPOINT, "", audioData, audioSize);
 }
 
 // ============== Main Listen Flow ==============
