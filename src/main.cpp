@@ -812,10 +812,10 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
                         int sampleCount = bytesRead / 2;
     
                         for (int i=0; i<sampleCount; i++) {
-                            // Volume scaling (adjust as needed, 0.8 is safer than 0.5 for low volume issues, but 0.5 is safe for distortion)
+                            // Volume set to 50% for comfortable listening level
                             int32_t val = (int32_t)monoSamples[i];
-                            val = val * 0.8; // 80% volume
-                            
+                            val = val * 0.5; // 50% volume
+
                             // Clip to prevent overflow (software limiter)
                             if (val > 32767) val = 32767;
                             if (val < -32768) val = -32768;

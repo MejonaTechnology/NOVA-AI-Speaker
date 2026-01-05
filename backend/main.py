@@ -701,8 +701,8 @@ async def process_ai_pipeline(user_text: str):
         # Use new chunked TTS generation function
         audio_array = await generate_tts_audio(ai_text)
 
-        # No volume boost to prevent clipping/distortion
-        audio_array = np.clip(audio_array * 1.0, -32768, 32767).astype(np.int16)
+        # Volume set to 50% for comfortable listening
+        audio_array = np.clip(audio_array * 0.5, -32768, 32767).astype(np.int16)
 
         # Send MONO audio directly to save bandwidth (50% reduction)
         # ESP32 will handle mono-to-stereo duplication for I2S
