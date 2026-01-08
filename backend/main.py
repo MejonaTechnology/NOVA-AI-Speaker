@@ -24,12 +24,31 @@ from threading import Thread
 load_dotenv()
 
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response, RedirectResponse
 from groq import Groq
 from tuya_controller import light_controller
 from firestick_controller import firestick_controller
 
+# Firestick Bridge Configuration (for remote control via OCI)
+FIRESTICK_BRIDGE_URL = os.environ.get("FIRESTICK_BRIDGE_URL", "")  # e.g., https://abc123.ngrok.io
+FIRESTICK_BRIDGE_KEY = os.environ.get("FIRESTICK_BRIDGE_KEY", "nova-firestick-2024")
+
 app = FastAPI(title="NOVA AI Backend")
+
+# Enable CORS for Frontend
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all for development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Audio Queue for ESP32 (Polling)
+# Stores tuples of (audio_bytes, expression_code)
+esp_audio_queue = deque(maxlen=5)
 
 # Initialize Groq client (set GROQ_API_KEY environment variable)
 client = Groq()
@@ -40,10 +59,11 @@ conversation_history = deque(maxlen=12)
 # Weather cache (updated every 5 minutes)
 weather_data = {
     "last_update": None,
-    "temperature": None,
-    "condition": None,
-    "humidity": None,
-    "wind_speed": None,
+    "temperature": 0,
+    "condition": "Unknown",
+    "humidity": 0,
+    "wind_speed": 0,
+    "pressure": 0,
     "location": "Whitefield, Bangalore"
 }
 
@@ -266,32 +286,42 @@ def add_to_history(role: str, content: str):
 
 
 def fetch_weather():
-    """Fetch weather data for Whitefield, Bangalore using wttr.in"""
+    """Fetch weather data for Whitefield, Bangalore using Open-Meteo"""
     global weather_data
     try:
-        # Using wttr.in API (no API key required)
-        url = "https://wttr.in/Whitefield,Bangalore?format=j1"
-        response = requests.get(url, timeout=5)
+        # Whitefield, Bangalore: 12.9698° N, 77.7499° E
+        url = "https://api.open-meteo.com/v1/forecast?latitude=12.9698&longitude=77.7499&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min&timezone=Asia%2FKolkata"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+        data = json_data.get("current", {})
+        daily = json_data.get("daily", {})
 
-        if response.status_code == 200:
-            data = response.json()
-            current = data['current_condition'][0]
+        # WMO Weather Code Mapping
+        code = data.get("weather_code", 0)
+        condition = "Clear"
+        if code in [1, 2, 3]: condition = "Partly Cloudy"
+        elif code in [45, 48]: condition = "Foggy"
+        elif code in [51, 53, 55]: condition = "Drizzle"
+        elif code in [61, 63, 65]: condition = "Rain"
+        elif code in [71, 73, 75]: condition = "Snow"
+        elif code in [80, 81, 82]: condition = "Showers"
+        elif code in [95, 96, 99]: condition = "Thunderstorm"
 
-            weather_data.update({
-                "last_update": datetime.now(pytz.timezone('Asia/Kolkata')),
-                "temperature": int(current['temp_C']),
-                "feels_like": int(current['FeelsLikeC']),
-                "condition": current['weatherDesc'][0]['value'],
-                "humidity": int(current['humidity']),
-                "wind_speed": int(current['windspeedKmph']),
-                "wind_dir": current['winddir16Point'],
-                "visibility": int(current['visibility']),
-                "pressure": int(current['pressure']),
-                "uv_index": int(current['uvIndex'])
-            })
-            print(f"[WEATHER] Updated: {weather_data['temperature']}°C, {weather_data['condition']}")
-        else:
-            print(f"[WEATHER] Failed to fetch: HTTP {response.status_code}")
+        weather_data = {
+            "last_update": datetime.now(pytz.timezone('Asia/Kolkata')),
+            "temperature": round(data.get("temperature_2m", 0)),
+            "temp_min": round(daily.get("temperature_2m_min", [0])[0]),
+            "temp_max": round(daily.get("temperature_2m_max", [0])[0]),
+            "condition": condition,
+            "weather_code": code,
+            "is_day": data.get("is_day", 1), # 1 = Day, 0 = Night
+            "humidity": data.get("relative_humidity_2m", 0),
+            "wind_speed": data.get("wind_speed_10m", 0),
+            "pressure": round(data.get("surface_pressure", 0)),
+            "location": "Whitefield, Bangalore"
+        }
+        print(f"[WEATHER] Updated: {weather_data['temperature']}°C, {weather_data['condition']}")
     except Exception as e:
         print(f"[WEATHER] Error fetching weather: {e}")
 
@@ -303,13 +333,11 @@ def get_weather_info():
 
     weather_info = f"""
 CURRENT WEATHER ({weather_data['location']}):
-- Temperature: {weather_data['temperature']}°C (Feels like {weather_data['feels_like']}°C)
+- Temperature: {weather_data['temperature']}°C
 - Conditions: {weather_data['condition']}
 - Humidity: {weather_data['humidity']}%
-- Wind: {weather_data['wind_speed']} km/h {weather_data['wind_dir']}
-- Visibility: {weather_data['visibility']} km
+- Wind: {weather_data['wind_speed']} km/h
 - Pressure: {weather_data['pressure']} mb
-- UV Index: {weather_data['uv_index']}
 - Last Updated: {weather_data['last_update'].strftime('%I:%M %p IST')}
 """
     return weather_info
@@ -469,30 +497,57 @@ def process_light_commands(text: str):
     return text.strip()
 
 
+def call_firestick_bridge(command: str) -> bool:
+    """
+    Call the remote Fire TV bridge service.
+    Used when backend is on OCI and Fire TV is on home network.
+    """
+    if not FIRESTICK_BRIDGE_URL:
+        return False
+    
+    try:
+        response = requests.post(
+            f"{FIRESTICK_BRIDGE_URL.rstrip('/')}/command",
+            json={"command": command},
+            headers={
+                "Content-Type": "application/json",
+                "X-API-Key": FIRESTICK_BRIDGE_KEY
+            },
+            timeout=10
+        )
+        result = response.json()
+        if response.status_code == 200 and result.get("status") == "success":
+            print(f"[FIRESTICK BRIDGE] ✅ Command '{command}' executed via bridge")
+            return True
+        else:
+            print(f"[FIRESTICK BRIDGE] ❌ Bridge returned: {result}")
+            return False
+    except Exception as e:
+        print(f"[FIRESTICK BRIDGE] ❌ Error calling bridge: {e}")
+        return False
+
+
 def process_firestick_commands(text: str):
-    """Process and execute Firestick control commands from AI response"""
-    # Detect and execute Firestick commands
+    """
+    Extract Firestick command from AI response.
+    Returns: (cleaned_text, firestick_command or None)
+    
+    Command will be sent to ESP32 via X-Firestick-Cmd header.
+    ESP32 executes it locally (same network as Fire TV).
+    """
+    firestick_cmd = None
+    
+    # Detect Firestick commands
     firestick_match = re.search(r'\[FIRESTICK:(\w+)\]', text)
 
     if firestick_match:
-        command = firestick_match.group(1)
-        print(f"[FIRESTICK] Executing command: {command}")
-
-        # Import the execute function
-        from firestick_controller import execute_firestick_command
-
-        # Execute the command
-        success = execute_firestick_command(command)
-
-        if success:
-            print(f"[FIRESTICK] ✅ Command '{command}' executed successfully")
-        else:
-            print(f"[FIRESTICK] ❌ Command '{command}' failed")
+        firestick_cmd = firestick_match.group(1).lower()
+        print(f"[FIRESTICK] Extracted command for ESP32: {firestick_cmd}")
 
     # Remove all Firestick markers from text for TTS (so they don't get spoken)
     text = re.sub(r'\[FIRESTICK:\w+\]', '', text)
 
-    return text.strip()
+    return text.strip(), firestick_cmd
 
 
 def chunk_text_for_tts(text: str, max_length: int = 200):
@@ -689,7 +744,7 @@ async def process_ai_pipeline(user_text: str):
 
     # 3. Process smart home commands (if any) and clean text for TTS
     ai_text = process_light_commands(ai_text)
-    ai_text = process_firestick_commands(ai_text)
+    ai_text, firestick_cmd = process_firestick_commands(ai_text)
 
     # 4. Extract facial expression for ESP32 OLED display
     expression_code = extract_expression(ai_text)
@@ -710,19 +765,28 @@ async def process_ai_pipeline(user_text: str):
         
         print(f"[AUDIO] Final output: {len(pcm_bytes)} bytes of raw PCM (16kHz, 16-bit, MONO)")
         print(f"[AUDIO] Duration: {len(audio_array) / 16000:.2f} seconds")
+        if firestick_cmd:
+            print(f"[FIRESTICK] Sending command to ESP32: {firestick_cmd}")
         print(f"[SEND] Sending response to ESP32...")
 
-        # Return raw PCM audio with transcription and AI response text in headers
+        # Build response headers
+        headers = {
+            "X-Audio-Sample-Rate": "16000",
+            "X-Audio-Channels": "1",
+            "X-Audio-Bits": "16",
+            "X-Expression": str(expression_code),
+            "Content-Length": str(len(pcm_bytes))
+        }
+        
+        # Add Fire TV command header if present (ESP32 will execute locally)
+        if firestick_cmd:
+            headers["X-Firestick-Cmd"] = firestick_cmd
+
+        # Return raw PCM audio with headers
         return Response(
             content=pcm_bytes,
             media_type="application/octet-stream",
-            headers={
-                "X-Audio-Sample-Rate": "16000",
-                "X-Audio-Channels": "1", # Changed to 1 channel
-                "X-Audio-Bits": "16",
-                "X-Expression": str(expression_code),  # Facial expression code (0-6)
-                "Content-Length": str(len(pcm_bytes))
-            }
+            headers=headers
         )
     except Exception as e:
         print(f"[ERR] Audio processing failed: {e}")
@@ -788,9 +852,204 @@ async def process_text(request: TextRequest):
 
 
 
+
+@app.get("/status")
+async def get_status():
+    """Get system status for Dashboard"""
+    # Get Light Status
+    light_status = {
+        "on": light_controller.is_on,  # Track on/off state
+        "mode": light_controller.current_color_name,  # Return actual color name
+        "brightness": light_controller.current_brightness,
+        "color": light_controller.current_color_hsv
+    }
+    
+    return {
+        "weather": weather_data,
+        "light": light_status,
+        "queue_size": len(esp_audio_queue)
+    }
+
+class LightCommand(BaseModel):
+    action: str  # "on", "off", "brightness", "color"
+    value: str | int | None = None
+
+@app.post("/control/light")
+async def control_light(cmd: LightCommand):
+    """Control Smart Light"""
+    print(f"[API] Light Command: {cmd.action} -> {cmd.value}")
+    
+    if cmd.action == "on":
+        light_controller.turn_on()
+    elif cmd.action == "off":
+        light_controller.turn_off()
+    elif cmd.action == "brightness":
+        light_controller.set_brightness(int(cmd.value))
+    elif cmd.action == "color":
+        light_controller.set_color(str(cmd.value))
+    
+    return {"status": "success", "command": cmd.dict()}
+
+class FirestickCommand(BaseModel):
+    command: str
+
+@app.post("/control/firestick")
+async def control_firestick(cmd: FirestickCommand):
+    """Control Firestick via bridge or local ADB"""
+    print(f"[API] Firestick Command: {cmd.command}")
+    
+    # Try remote bridge first (for OCI deployment)
+    if FIRESTICK_BRIDGE_URL:
+        success = call_firestick_bridge(cmd.command)
+    else:
+        # Fall back to local ADB (for local development)
+        from firestick_controller import execute_firestick_command
+        success = execute_firestick_command(cmd.command)
+    
+    return {"status": "success" if success else "failed"}
+
+@app.get("/audio/consume")
+async def consume_audio_queue():
+    """ESP32 Polls this endpoint to get pending audio"""
+    if not esp_audio_queue:
+        return Response(status_code=204) # No content
+    
+    # Pop oldest audio
+    pcm_bytes, expression = esp_audio_queue.popleft()
+    print(f"[QUEUE] Sending {len(pcm_bytes)} bytes to ESP32 (Left: {len(esp_audio_queue)})")
+    
+    return Response(
+        content=pcm_bytes,
+        media_type="application/octet-stream",
+        headers={
+            "X-Audio-Sample-Rate": "16000",
+            "X-Audio-Channels": "1",
+            "X-Audio-Bits": "16",
+            "X-Expression": str(expression),
+            "Content-Length": str(len(pcm_bytes))
+        }
+    )
+
+class TTSSpeechRequest(BaseModel):
+    text: str
+    target: str = "local" # "local" (return audio) or "esp" (queue)
+
+@app.post("/tts/speak")
+async def speak_text(req: TTSSpeechRequest):
+    """Generate TTS. If target='esp', add to queue. Else return audio."""
+    print(f"[API] Speak Request: '{req.text}' -> Target: {req.target}")
+    
+    # Generate AI Audio (bypassing LLM for direct TTS if needed, OR use pipeline)
+    # Actually, we likely want the AI to Reply.
+    # But if this is "Make AI Speak X", we use TTS directly.
+    
+    audio_array = await generate_tts_audio(req.text)
+    
+    # 50% volume and clip
+    audio_array = np.clip(audio_array * 0.5, -32768, 32767).astype(np.int16)
+    pcm_bytes = audio_array.tobytes()
+    
+    expression = extract_expression(req.text)
+    
+    if req.target == "esp":
+        esp_audio_queue.append((pcm_bytes, expression))
+        return {"status": "queued", "queue_size": len(esp_audio_queue)}
+    else:
+        return Response(
+            content=pcm_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Audio-Sample-Rate": "16000",
+                "X-Audio-Channels": "1",
+                "X-Audio-Bits": "16",
+                "X-Expression": str(expression),
+                "Content-Length": str(len(pcm_bytes))
+            }
+        )
+
+@app.post("/chat/send")
+async def chat_send(req: TTSSpeechRequest):
+    """
+    Send text to AI. 
+    If target='esp', the AI response AUDIO is queued for ESP. 
+    Else returned to caller.
+    """
+    print(f"[API] Chat Request: '{req.text}' -> Target: {req.target}")
+    
+    # 1. Add to history
+    add_to_history("user", req.text)
+    
+    # 2. LLM
+    try:
+        messages = get_conversation_messages()
+        messages.append({"role": "user", "content": req.text})
+        chat_response = client.chat.completions.create(
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
+        )
+        ai_text = chat_response.choices[0].message.content.strip()
+        add_to_history("assistant", ai_text)
+    except Exception as e:
+        ai_text = "I'm having trouble thinking."
+        print(f"[API] LLM Error: {e}")
+
+    # 3. Process Commands
+    ai_text = process_light_commands(ai_text)
+    ai_text = process_firestick_commands(ai_text)
+    
+    # 4. Generate Audio
+    audio_array = await generate_tts_audio(ai_text)
+    audio_array = np.clip(audio_array * 0.5, -32768, 32767).astype(np.int16)
+    pcm_bytes = audio_array.tobytes()
+    expression = extract_expression(ai_text)
+    
+    if req.target == "esp":
+        esp_audio_queue.append((pcm_bytes, expression))
+        return {"status": "queued", "ai_text": ai_text}
+    else:
+        return Response(
+            content=pcm_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Audio-Sample-Rate": "16000",
+                "X-Audio-Channels": "1",
+                "X-Audio-Bits": "16",
+                "X-Expression": str(expression),
+                "X-AI-Text": quote(ai_text),
+                "Content-Length": str(len(pcm_bytes))
+            }
+        )
+
 @app.get("/")
 async def root():
-    return {"status": "NOVA AI Backend running", "endpoints": ["/voice"]}
+    return RedirectResponse(url="/ui")
+
+# Mount Frontend (Must be last)
+import os
+
+# Check multiple possible locations for frontend/dist
+possible_paths = [
+    # 1. Local Dev: ../frontend/dist (relative to backend/main.py)
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist"),
+    # 2. Docker Container: ./frontend/dist (relative to /app/main.py)
+    os.path.join(os.path.dirname(__file__), "frontend", "dist"),
+    # 3. Docker Container (Alternative): /app/frontend/dist
+    "/app/frontend/dist"
+]
+
+frontend_dist = None
+for path in possible_paths:
+    if os.path.exists(path) and os.path.isdir(path):
+        frontend_dist = path
+        break
+
+if frontend_dist:
+    app.mount("/ui", StaticFiles(directory=frontend_dist, html=True), name="ui") 
+    print(f"[STARTUP] Serving Frontend at /ui from {frontend_dist}")
+else:
+    print(f"[STARTUP] Frontend build NOT FOUND. Checked: {possible_paths}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
 #include "config.h"
+#include "firestick.h"  // Fire TV ADB control
 
 // Edge Impulse Wake Word
 #include <test-new_inferencing.h>
@@ -733,6 +734,7 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     bool headerEnded = false;
     int contentLength = -1;
     String line;
+    String firestickCmd = "";  // Fire TV command from backend
     
     while(client.connected() || client.available()) {
         line = client.readStringUntil('\n');
@@ -740,6 +742,13 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
         
         if (line.startsWith("Content-Length: ")) {
             contentLength = line.substring(16).toInt();
+        }
+        
+        // Check for Fire TV command header
+        if (line.startsWith("X-Firestick-Cmd: ")) {
+            firestickCmd = line.substring(17);
+            firestickCmd.trim();
+            Serial.printf("[FIRESTICK] Command from backend: %s\n", firestickCmd.c_str());
         }
         
         if (line == "\r" || line == "") {
@@ -755,6 +764,17 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     }
 
     Serial.printf("[HTTP] Body start. Content-Length: %d\n", contentLength);
+    
+    // Execute Fire TV command BEFORE playing audio (so action happens immediately)
+    if (firestickCmd.length() > 0) {
+        Serial.printf("[FIRESTICK] Executing: %s\n", firestickCmd.c_str());
+        bool success = executeFirestickCommand(firestickCmd.c_str());
+        if (success) {
+            Serial.println("[FIRESTICK] ✅ Command executed successfully!");
+        } else {
+            Serial.println("[FIRESTICK] ❌ Command failed");
+        }
+    }
     
     // Play Audio Stream
     soundSuccess(); 
@@ -845,6 +865,119 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     isPlaying = false;
     setLedColor(0,0,0);
     Serial.printf("[SPK] Playback complete. Total: %d bytes\n", totalBytes);
+}
+
+// ============== Check Remote Commands ==============
+void checkRemoteCommands() {
+    if (WiFi.status() != WL_CONNECTED || isRecording || isPlaying) return;
+    if (isMuted) return; // Don't speak if muted
+
+    static unsigned long lastCheck = 0;
+    if (millis() - lastCheck < 2000) return; // Check every 2 seconds
+    lastCheck = millis();
+
+    WiFiClient client;
+    if (!client.connect(BACKEND_HOST, BACKEND_PORT)) return;
+    
+    // GET request (Poll for audio)
+    client.println(String("GET /audio/consume HTTP/1.0"));
+    client.println("Host: " + String(BACKEND_HOST));
+    client.println("Connection: close");
+    client.println();
+
+    unsigned long val = millis();
+    while (client.available() == 0) {
+        if (millis() - val > 3000) { client.stop(); return; }
+        delay(1);
+    }
+    
+    // Check status
+    String line = client.readStringUntil('\n');
+    // If not 200 (e.g. 204 No Content), stop
+    if (line.indexOf("200") < 0) { client.stop(); return; } 
+    
+    Serial.println("[REMOTE] Found queued audio content!");
+    
+    // Skip headers and find Content-Length
+    int len = 0;
+    while(client.available()) {
+        String h = client.readStringUntil('\n');
+        if (h.startsWith("Content-Length: ")) len = h.substring(16).toInt();
+        if (h == "\r") break;
+    }
+    
+    if (len > 0) {
+        // Play Audio
+        isPlaying = true;
+        setLedColor(50,0,200); // Purple
+        soundSuccess(); // Notify user incoming message
+        
+        uint8_t* buff = (uint8_t*)malloc(1024);
+        uint8_t* stereo = (uint8_t*)malloc(2048);
+        
+        if (!buff || !stereo) {
+            Serial.println("[ERR] Malloc failed");
+            if(buff) free(buff); 
+            if(stereo) free(stereo);
+            client.stop(); isPlaying = false; return;
+        }
+
+        size_t total = 0;
+        uint8_t leftover = 0; 
+        bool hasLeftover = false;
+        unsigned long lastData = millis();
+        
+        while((client.connected() || client.available()) && total < len) {
+            int avail = client.available();
+            if (avail > 0) {
+                 lastData = millis();
+                 int offset = hasLeftover ? 1 : 0;
+                 int toRead = min(1024 - offset, avail);
+                 
+                 int read = client.read(buff + offset, toRead);
+                 
+                 if (read > 0) {
+                     if (hasLeftover) { 
+                        buff[0] = leftover; 
+                        read++; 
+                        hasLeftover=false; 
+                     }
+                     
+                     // Handle odd bytes by saving last one
+                     if (read % 2 != 0) { 
+                        leftover = buff[read-1]; 
+                        hasLeftover=true; 
+                        read--; 
+                     }
+                     
+                     if (read > 0) {
+                        int16_t* in = (int16_t*)buff;
+                        int16_t* out = (int16_t*)stereo;
+                        for(int i=0; i<read/2; i++) {
+                            // Convert to Stereo + 50% Volume
+                             int32_t sample = in[i];
+                             sample = sample * 0.5;
+                             out[i*2] = (int16_t)sample; 
+                             out[i*2+1] = (int16_t)sample;
+                        }
+                        size_t w;
+                        i2s_write(SPK_I2S_NUM, stereo, read*2, &w, portMAX_DELAY);
+                        total+=read;
+                     }
+                 }
+            }
+            
+            if (millis() - lastData > 5000) break; // Timeout
+        }
+        
+        free(buff); 
+        free(stereo);
+        i2s_zero_dma_buffer(SPK_I2S_NUM);
+        isPlaying = false;
+        setLedColor(0,0,0);
+        Serial.println("[REMOTE] Playback complete");
+    }
+    client.stop();
 }
 
 // ============== Send Text Command ==============
@@ -941,6 +1074,8 @@ void setup() {
 
 // ============== Loop ==============
 void loop() {
+    // Poll for remote commands (App -> Backend -> ESP32)
+    checkRemoteCommands();
 
 
     // Check for Mute Button (GPIO 4) with Long-Press Power Off

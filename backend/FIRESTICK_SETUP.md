@@ -212,28 +212,84 @@ adb shell pm list packages
 - **Firewall**: Use firewall rules to restrict ADB access
 - **Disable when done**: Turn off ADB debugging after testing
 
-## Production Deployment
+## Production Deployment (OCI + Home Network)
 
-For OCI server deployment:
+If your backend runs on OCI but Fire TV is on your home network, use the **Bridge Service**.
 
-1. Install ADB on server:
+### Step 1: Run Bridge Locally (Your PC)
+
 ```bash
-ssh ubuntu@nova.mejona.com
-sudo apt update
-sudo apt install adb
+cd backend
+
+# Start the bridge service
+python firestick_bridge.py
 ```
 
-2. Update Firestick IP in `firestick_controller.py` (should be same network)
-
-3. Test connection from server:
-```bash
-adb connect YOUR_FIRESTICK_IP:5555
+Expected output:
+```
+╔══════════════════════════════════════════════════════════════╗
+║          🔥 NOVA Fire TV Bridge Service 🔥                  ║
+╠══════════════════════════════════════════════════════════════╣
+║  Port: 8585                                                   ║
+║  Fire TV IP: 192.168.31.165                                   ║
+╚══════════════════════════════════════════════════════════════╝
+[BRIDGE] ✅ Fire TV connected successfully!
 ```
 
-4. Deploy backend with Docker (ADB will be accessible from container)
+### Step 2: Expose Bridge with Ngrok
+
+```bash
+# Install ngrok (one-time)
+# Download from https://ngrok.com/download
+
+# Start ngrok tunnel
+ngrok http 8585
+```
+
+Copy the HTTPS URL (e.g., `https://abc123.ngrok-free.app`)
+
+### Step 3: Configure OCI Backend
+
+SSH to OCI server and update `.env`:
+```bash
+ssh -i oci_key ubuntu@nova.mejona.com
+cd ~/nova-ai-backend
+
+# Add to .env
+echo 'FIRESTICK_BRIDGE_URL=https://abc123.ngrok-free.app' >> .env
+echo 'FIRESTICK_BRIDGE_KEY=nova-firestick-2024' >> .env
+
+# Restart backend
+sudo docker restart nova-ai-backend
+```
+
+### Step 4: Test
+
+```bash
+# From anywhere
+curl -X POST https://nova.mejona.com/control/firestick \
+  -H "Content-Type: application/json" \
+  -d '{"command": "home"}'
+```
+
+Fire TV should go to home screen!
+
+### Architecture
+
+```
+Voice/UI → OCI Backend → Internet → Ngrok → Bridge (PC) → ADB → Fire TV
+```
+
+### Keep Bridge Running
+
+For always-on operation:
+- **Windows**: Create a startup shortcut or use Task Scheduler
+- **Raspberry Pi**: Use systemd service
+- **Ngrok**: Get a paid plan for static URLs, or use Cloudflare Tunnel
 
 ---
 
-**Last Updated**: 2025-12-31
-**Status**: ✅ Production Ready
+**Last Updated**: 2026-01-08
+**Status**: ✅ Production Ready with Bridge Support
 **Integration**: Fully integrated with NOVA AI voice assistant
+
