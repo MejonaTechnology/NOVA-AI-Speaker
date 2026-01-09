@@ -7,7 +7,6 @@
 #include <driver/i2s.h>
 #include <Adafruit_NeoPixel.h>
 #include "config.h"
-#include "firestick.h"  // Fire TV ADB control
 
 // Edge Impulse Wake Word
 #include <test-new_inferencing.h>
@@ -734,21 +733,12 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     bool headerEnded = false;
     int contentLength = -1;
     String line;
-    String firestickCmd = "";  // Fire TV command from backend
     
     while(client.connected() || client.available()) {
         line = client.readStringUntil('\n');
-        // Serial.println(line); // Debug headers if needed
         
         if (line.startsWith("Content-Length: ")) {
             contentLength = line.substring(16).toInt();
-        }
-        
-        // Check for Fire TV command header
-        if (line.startsWith("X-Firestick-Cmd: ")) {
-            firestickCmd = line.substring(17);
-            firestickCmd.trim();
-            Serial.printf("[FIRESTICK] Command from backend: %s\n", firestickCmd.c_str());
         }
         
         if (line == "\r" || line == "") {
@@ -764,17 +754,6 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
     }
 
     Serial.printf("[HTTP] Body start. Content-Length: %d\n", contentLength);
-    
-    // Execute Fire TV command BEFORE playing audio (so action happens immediately)
-    if (firestickCmd.length() > 0) {
-        Serial.printf("[FIRESTICK] Executing: %s\n", firestickCmd.c_str());
-        bool success = executeFirestickCommand(firestickCmd.c_str());
-        if (success) {
-            Serial.println("[FIRESTICK] ✅ Command executed successfully!");
-        } else {
-            Serial.println("[FIRESTICK] ❌ Command failed");
-        }
-    }
     
     // Play Audio Stream
     soundSuccess(); 

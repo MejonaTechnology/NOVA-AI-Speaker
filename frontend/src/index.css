@@ -1,0 +1,28 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-sci-base text-gray-200 overflow-y-auto;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-[#050B14];
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-[#1E293B] rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-[#00F0FF];
+}

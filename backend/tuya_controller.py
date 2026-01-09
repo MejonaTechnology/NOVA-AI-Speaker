@@ -155,7 +155,9 @@ class SmartLightController:
         self.device_id = "d7a2448c70762e9235aca7"  # Bedroom light
 
         # State tracking
+        self.is_on = False  # Track on/off state
         self.current_mode = "white"  # "white" or "colour"
+        self.current_color_name = "white"  # Track actual color name for UI
         self.current_brightness = 70  # 0-100 percent
         self.current_color_hsv = {"h": 240, "s": 1000, "v": 700}  # Default blue
 
@@ -174,15 +176,21 @@ class SmartLightController:
 
     def turn_on(self):
         """Turn light ON"""
-        return self.api.send_commands(self.device_id, [
+        result = self.api.send_commands(self.device_id, [
             {"code": "switch_led", "value": True}
         ])
+        if result:
+            self.is_on = True
+        return result
 
     def turn_off(self):
         """Turn light OFF"""
-        return self.api.send_commands(self.device_id, [
+        result = self.api.send_commands(self.device_id, [
             {"code": "switch_led", "value": False}
         ])
+        if result:
+            self.is_on = False
+        return result
 
     def set_brightness(self, percent):
         """Set brightness (0-100%) - works for both white and color modes"""
@@ -212,11 +220,12 @@ class SmartLightController:
         if color_name == "white" or color_name == "warm" or color_name == "cool":
             # Use white mode
             self.current_mode = "white"
-            temp_value = 500  # Default middle
+            self.current_color_name = color_name  # Track actual selection
+            temp_value = 1000  # Default to Cool White (1000)
             if color_name == "warm":
-                temp_value = 800  # Warm white
+                temp_value = 0  # Warmest (0)
             elif color_name == "cool":
-                temp_value = 200  # Cool white
+                temp_value = 1000  # Coolest (1000)
 
             # Use current brightness for white mode
             brightness_value = max(10, min(1000, int(self.current_brightness * 10)))
@@ -229,6 +238,7 @@ class SmartLightController:
         elif color_name in self.colors:
             # Use color mode
             self.current_mode = "colour"
+            self.current_color_name = color_name  # Track actual selection
 
             # Get h and s from color map, use current brightness for v
             color_hs = self.colors[color_name]

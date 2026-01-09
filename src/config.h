@@ -54,9 +54,9 @@
 #define OLED_RESET          -1  // No reset pin (use -1)
 #define OLED_ADDRESS        0x3C  // Common I2C address (0x3C or 0x3D)
 
-// ============== Fire TV Stick (ADB Control) ==============
+// ==============// Fire TV Stick (Disabled - requires bridge or different approach)
 #define FIRESTICK_IP        "192.168.31.165"  // Fire TV IP address
 #define FIRESTICK_PORT      5555               // ADB port (default)
-#define FIRESTICK_ENABLED   true               // Enable/disable Fire TV control
+#define FIRESTICK_ENABLED   false               // Enable/disable Fire TV control
 
 #endif // CONFIG_H

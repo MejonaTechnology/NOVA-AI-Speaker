@@ -11,3 +11,4 @@ gTTS>=2.3.0
 pydub>=0.25.0
 requests>=2.31.0
 pytz>=2024.1
+aiofiles>=23.2.1
