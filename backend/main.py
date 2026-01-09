@@ -974,6 +974,7 @@ async def chat_send(req: TTSSpeechRequest):
     If target='esp', the AI response AUDIO is queued for ESP. 
     Else returned to caller.
     """
+    print(f"[RECV] Received text input: {req.text}")
     print(f"[API] Chat Request: '{req.text}' -> Target: {req.target}")
     
     # 1. Add to history
@@ -997,7 +998,10 @@ async def chat_send(req: TTSSpeechRequest):
 
     # 3. Process Commands
     ai_text = process_light_commands(ai_text)
-    ai_text = process_firestick_commands(ai_text)
+    ai_text, firestick_cmd = process_firestick_commands(ai_text)  # Fixed: unpack tuple
+    
+    if firestick_cmd:
+        print(f"[FIRESTICK] Chat command for ESP32: {firestick_cmd}")
     
     # 4. Generate Audio
     audio_array = await generate_tts_audio(ai_text)
@@ -1007,19 +1011,26 @@ async def chat_send(req: TTSSpeechRequest):
     
     if req.target == "esp":
         esp_audio_queue.append((pcm_bytes, expression))
-        return {"status": "queued", "ai_text": ai_text}
+        return {"status": "queued", "ai_text": ai_text, "firestick_cmd": firestick_cmd}
     else:
+        # Build headers
+        headers = {
+            "X-Audio-Sample-Rate": "16000",
+            "X-Audio-Channels": "1",
+            "X-Audio-Bits": "16",
+            "X-Expression": str(expression),
+            "X-AI-Text": quote(ai_text),
+            "Content-Length": str(len(pcm_bytes))
+        }
+        
+        # Add Fire TV command header if present
+        if firestick_cmd:
+            headers["X-Firestick-Cmd"] = firestick_cmd
+        
         return Response(
             content=pcm_bytes,
             media_type="application/octet-stream",
-            headers={
-                "X-Audio-Sample-Rate": "16000",
-                "X-Audio-Channels": "1",
-                "X-Audio-Bits": "16",
-                "X-Expression": str(expression),
-                "X-AI-Text": quote(ai_text),
-                "Content-Length": str(len(pcm_bytes))
-            }
+            headers=headers
         )
 
 @app.get("/")
