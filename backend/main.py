@@ -210,6 +210,29 @@ When user asks to control TV/Firestick/Netflix/YouTube, MUST include appropriate
 They control the real Firestick device. ALWAYS include them for TV control!
 
 ═══════════════════════════════════════════════════════════
+🔴 SCHEDULED JOBS & ALARMS 🔴
+═══════════════════════════════════════════════════════════
+
+YOU CAN SET REMINDERS AND ALARMS!
+
+MANDATORY RULES:
+When user asks for timer, reminder, or alarm, use the marker: [SCHEDULE: seconds message]
+
+Format: [SCHEDULE: seconds message_to_speak]
+
+Examples:
+- "Remind me in 10 minutes to check oven" → "Okay, I'll remind you! [SCHEDULE: 600 Check the oven!]"
+- "Set alarm for 5 seconds" → "Alarm set! [SCHEDULE: 5 Time is up!]"
+- "Remind me to drink water in 1 hour" → "Sure! [SCHEDULE: 3600 Drink some water!]"
+
+Calculation:
+- 1 minute = 60 seconds
+- 1 hour = 3600 seconds
+
+⚠️ CRITICAL: The marker [SCHEDULE: seconds message] is hidden from the immediate response.
+The system will wait for 'seconds' and then SPEAK 'message' automatically.
+
+═══════════════════════════════════════════════════════════
 
 CRITICAL BREVITY RULES - STRICTLY FOLLOW:
 1. Simple commands (lights, time, weather, greetings) = ONE sentence ONLY (3-6 words)
@@ -550,6 +573,32 @@ def process_firestick_commands(text: str):
     return text.strip(), firestick_cmd
 
 
+def process_schedule_commands(text: str):
+    """
+    Extract Schedule command from AI response.
+    Returns: (cleaned_text, schedule_data or None)
+    schedule_data = (seconds, message)
+    """
+    schedule_data = None
+    
+    # Detect [SCHEDULE: seconds message]
+    # Example: [SCHEDULE: 600 Check the oven!]
+    match = re.search(r'\[SCHEDULE:\s*(\d+)\s+(.+?)\]', text)
+    if match:
+        try:
+            seconds = int(match.group(1))
+            message = match.group(2).strip()
+            schedule_data = (seconds, message)
+            print(f"[SCHEDULE] Detected: {seconds}s delay -> '{message}'")
+        except ValueError:
+            print("[SCHEDULE] Error parsing seconds")
+
+    # Remove schedule marker from text for immediate TTS (so user hears confirmation only)
+    text = re.sub(r'\[SCHEDULE:\s*\d+\s+.+?\]', '', text)
+
+    return text.strip(), schedule_data
+
+
 def chunk_text_for_tts(text: str, max_length: int = 200):
     """
     Split text into chunks <= max_length, preserving sentence boundaries.
@@ -708,6 +757,33 @@ async def generate_tts_audio(text: str):
 
     return final_audio
 
+
+async def run_scheduled_job(seconds: int, message: str):
+    """Background task for scheduled jobs"""
+    print(f"[SCHEDULE] Sleeping for {seconds} seconds...")
+    await asyncio.sleep(seconds)
+    
+    print(f"[SCHEDULE] Waking up! Generating audio for: '{message}'")
+    
+    try:
+        # Generate TTS for the scheduled message
+        # This uses the same pipeline logic but purely backend-initiated
+        audio_array = await generate_tts_audio(message)
+        
+        # 50% volume and clip (Standard processing)
+        audio_array = np.clip(audio_array * 0.5, -32768, 32767).astype(np.int16)
+        pcm_bytes = audio_array.tobytes()
+        
+        # Extract expression for the display
+        expression = extract_expression(message)
+        
+        # Add to the ESP32 Queue
+        esp_audio_queue.append((pcm_bytes, expression))
+        print(f"[SCHEDULE] Queued audio job (Queue size: {len(esp_audio_queue)})")
+        
+    except Exception as e:
+        print(f"[SCHEDULE] Job failed: {e}")
+
 async def process_ai_pipeline(user_text: str):
     """
     Common pipeline for Voice and Text input:
@@ -743,8 +819,15 @@ async def process_ai_pipeline(user_text: str):
         add_to_history("assistant", ai_text)
 
     # 3. Process smart home commands (if any) and clean text for TTS
+    # 3. Process smart home commands (if any) and clean text for TTS
     ai_text = process_light_commands(ai_text)
     ai_text, firestick_cmd = process_firestick_commands(ai_text)
+    ai_text, schedule_job = process_schedule_commands(ai_text)
+    
+    # Launch scheduled job if present
+    if schedule_job:
+        sec, msg = schedule_job
+        asyncio.create_task(run_scheduled_job(sec, msg))
 
     # 4. Extract facial expression for ESP32 OLED display
     expression_code = extract_expression(ai_text)

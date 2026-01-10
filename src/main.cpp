@@ -194,10 +194,10 @@ void setupSpeaker() {
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
         .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = (int)ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,    // Reduced from 24: smaller buffer = faster response + less delay
-        .dma_buf_len = 512,    // Reduced from 1024: smaller chunks = tighter timing control
-        .use_apll = false,     // APLL DISABLED - fixes slow/fast playback speed issues
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 16,   // Increased from 8 for more buffer headroom
+        .dma_buf_len = 1024,   // Increased from 512 for smoother streaming
+        .use_apll = false,     // Standard clock (APLL can cause speed issues)
         .tx_desc_auto_clear = true,
         .fixed_mclk = 0
     };
@@ -211,7 +211,7 @@ void setupSpeaker() {
 
     ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_NUM, &i2s_config, 0, NULL));
     ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_NUM, &pin_config));
-    Serial.println("[SPK] Speaker initialized (16kHz stereo, standard clock)");
+    Serial.println("[SPK] Speaker initialized (16kHz stereo, 16KB DMA buffer)");
 }
 
 // ============== Display Functions Removed ==============
@@ -672,6 +672,103 @@ uint8_t* recordAudio(size_t* bytesRecorded) {
 
 
 
+
+// ============== Shared Audio Playback Function ==============
+// Handles buffering, stereo conversion, volume, and silence flush
+void playStream(WiFiClient& client) {
+    soundSuccess(); 
+    Serial.println("[STREAM] Starting playback...");
+    isPlaying = true;
+    setLedColor(50, 0, 200); // Purple
+
+    // Larger chunks for smoother streaming
+    const size_t chunkSize = 2048;
+    uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
+    uint8_t* stereoChunk = (uint8_t*)malloc(chunkSize * 2);
+
+    if (!audioChunk || !stereoChunk) {
+        Serial.println("[ERR] Chunk malloc failed!");
+        if(audioChunk) free(audioChunk);
+        if(stereoChunk) free(stereoChunk);
+        isPlaying = false;
+        return;
+    }
+
+    size_t totalBytes = 0;
+    size_t bytesWritten;
+    unsigned long lastActivity = millis();
+    
+    // 16-bit alignment buffer
+    uint8_t leftoverByte = 0;
+    bool hasLeftover = false;
+
+    while (client.connected() || client.available()) {
+        int avail = client.available();
+        if (avail > 0) {
+            int readOffset = hasLeftover ? 1 : 0;
+            int bytesToRead = min((int)chunkSize - readOffset, avail);
+            
+            int bytesRead = client.read(audioChunk + readOffset, bytesToRead);
+            
+            if (bytesRead > 0) {
+                if (hasLeftover) {
+                    audioChunk[0] = leftoverByte;
+                    bytesRead += 1;
+                    hasLeftover = false;
+                }
+                
+                // Ensure 16-bit alignment
+                if (bytesRead % 2 != 0) {
+                    leftoverByte = audioChunk[bytesRead - 1];
+                    hasLeftover = true;
+                    bytesRead -= 1;
+                }
+                
+                if (bytesRead > 0) {
+                    // Convert Mono to Stereo with volume
+                    int16_t* mono = (int16_t*)audioChunk;
+                    int16_t* stereo = (int16_t*)stereoChunk;
+                    int samples = bytesRead / 2;
+
+                    for (int i = 0; i < samples; i++) {
+                        int32_t val = (mono[i] * 50) / 100; // 50% volume
+                        stereo[i*2] = stereo[i*2+1] = (int16_t)val;
+                    }
+                    
+                    i2s_write(SPK_I2S_NUM, stereoChunk, bytesRead * 2, &bytesWritten, portMAX_DELAY);
+                    totalBytes += bytesRead;
+                    lastActivity = millis();
+                }
+            }
+        } else {
+            if (millis() - lastActivity > 8000) {
+                Serial.println("[STREAM] Timeout.");
+                break;
+            }
+            yield();
+        }
+    }
+    
+    free(audioChunk);
+    free(stereoChunk);
+
+    // FLUSH BUFFER WITH SILENCE (Standard I2S fix for cut-off audio)
+    const size_t silenceSize = 1024; 
+    uint8_t* silenceChunk = (uint8_t*)calloc(silenceSize, 1);
+    
+    if (silenceChunk) {
+        for (int i = 0; i < 20; i++) { 
+             i2s_write(SPK_I2S_NUM, silenceChunk, silenceSize, &bytesWritten, portMAX_DELAY);
+        }
+        free(silenceChunk);
+    }
+    
+    i2s_zero_dma_buffer(SPK_I2S_NUM); // Reset for next time
+    isPlaying = false;
+    setLedColor(0, 0, 0);
+    Serial.printf("[SPK] Playback complete. %d bytes\n", totalBytes);
+}
+
 // ============== Helper: Manual HTTP Request for Audio ==============
 void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody = nullptr, size_t audioSize = 0) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -755,95 +852,9 @@ void sendAudioRequest(String endpoint, String jsonBody = "", uint8_t* audioBody 
 
     Serial.printf("[HTTP] Body start. Content-Length: %d\n", contentLength);
     
-    // Play Audio Stream
-    soundSuccess(); 
-    Serial.println("[STREAM] Starting playback...");
-    isPlaying = true;
-    setLedColor(50, 0, 200); // Purple
-
-        const size_t chunkSize = 1024; // Tiny chunks for tight timing control (64ms @ 16kHz)
-        uint8_t* audioChunk = (uint8_t*)malloc(chunkSize);
-        uint8_t* stereoChunk = (uint8_t*)malloc(chunkSize * 2); // Buffer for stereo expansion
-
-        if (!audioChunk || !stereoChunk) {
-            Serial.println("[ERR] Chunk malloc failed!");
-            if(audioChunk) free(audioChunk);
-            if(stereoChunk) free(stereoChunk);
-            client.stop();
-            return;
-        }
-
-        size_t totalBytes = 0;
-        size_t bytesWritten;
-        unsigned long lastActivity = millis();
-        
-        // BUFFERING FOR ODD BYTES (Crucial for 16-bit alignment)
-        uint8_t leftoverByte = 0;
-        bool hasLeftover = false;
-
-        while (client.connected() || client.available()) {
-            int avail = client.available();
-            if (avail > 0) {
-                 // Calculate how much space we have. Leave 1 byte space at start if we have leftover.
-                 int readOffset = hasLeftover ? 1 : 0;
-                 int bytesToRead = min((int)chunkSize - readOffset, avail);
-                 
-                 int bytesRead = client.read(audioChunk + readOffset, bytesToRead);
-                 
-                 if (bytesRead > 0) {
-                    if (hasLeftover) {
-                        audioChunk[0] = leftoverByte;
-                        bytesRead += 1; // We added 1 byte
-                        hasLeftover = false;
-                    }
-                    
-                    // Check if we have an odd number of bytes
-                    if (bytesRead % 2 != 0) {
-                        leftoverByte = audioChunk[bytesRead - 1]; // Save last byte
-                        hasLeftover = true;
-                        bytesRead -= 1; // Don't process this byte yet
-                    }
-                    
-                    if (bytesRead > 0) { // If we have complete samples
-                        // Convert Mono to Stereo & Apply Volume
-                        int16_t* monoSamples = (int16_t*)audioChunk;
-                        int16_t* stereoSamples = (int16_t*)stereoChunk;
-                        int sampleCount = bytesRead / 2;
-    
-                        for (int i=0; i<sampleCount; i++) {
-                            // Volume set to 50% for comfortable listening level
-                            int32_t val = (int32_t)monoSamples[i];
-                            val = val * 0.5; // 50% volume
-
-                            // Clip to prevent overflow (software limiter)
-                            if (val > 32767) val = 32767;
-                            if (val < -32768) val = -32768;
-    
-                            stereoSamples[i*2] = (int16_t)val;     // Left
-                            stereoSamples[i*2+1] = (int16_t)val;   // Right
-                        }
-                        
-                        i2s_write(SPK_I2S_NUM, stereoChunk, bytesRead * 2, &bytesWritten, portMAX_DELAY);
-                        totalBytes += bytesRead;
-                        lastActivity = millis();
-                    }
-                 }
-            } else {
-                if (millis() - lastActivity > 10000) {
-                    Serial.println("[STREAM] Timeout reading body.");
-                    break;
-                }
-                delay(1);
-            }
-        }
-        
-        free(audioChunk);
-        free(stereoChunk);
+    // Play Audio Stream using Shared Function
+    playStream(client);
     client.stop();
-    i2s_zero_dma_buffer(SPK_I2S_NUM);
-    isPlaying = false;
-    setLedColor(0,0,0);
-    Serial.printf("[SPK] Playback complete. Total: %d bytes\n", totalBytes);
 }
 
 // ============== Check Remote Commands ==============
@@ -886,75 +897,8 @@ void checkRemoteCommands() {
     }
     
     if (len > 0) {
-        // Play Audio
-        isPlaying = true;
-        setLedColor(50,0,200); // Purple
-        soundSuccess(); // Notify user incoming message
-        
-        uint8_t* buff = (uint8_t*)malloc(1024);
-        uint8_t* stereo = (uint8_t*)malloc(2048);
-        
-        if (!buff || !stereo) {
-            Serial.println("[ERR] Malloc failed");
-            if(buff) free(buff); 
-            if(stereo) free(stereo);
-            client.stop(); isPlaying = false; return;
-        }
-
-        size_t total = 0;
-        uint8_t leftover = 0; 
-        bool hasLeftover = false;
-        unsigned long lastData = millis();
-        
-        while((client.connected() || client.available()) && total < len) {
-            int avail = client.available();
-            if (avail > 0) {
-                 lastData = millis();
-                 int offset = hasLeftover ? 1 : 0;
-                 int toRead = min(1024 - offset, avail);
-                 
-                 int read = client.read(buff + offset, toRead);
-                 
-                 if (read > 0) {
-                     if (hasLeftover) { 
-                        buff[0] = leftover; 
-                        read++; 
-                        hasLeftover=false; 
-                     }
-                     
-                     // Handle odd bytes by saving last one
-                     if (read % 2 != 0) { 
-                        leftover = buff[read-1]; 
-                        hasLeftover=true; 
-                        read--; 
-                     }
-                     
-                     if (read > 0) {
-                        int16_t* in = (int16_t*)buff;
-                        int16_t* out = (int16_t*)stereo;
-                        for(int i=0; i<read/2; i++) {
-                            // Convert to Stereo + 50% Volume
-                             int32_t sample = in[i];
-                             sample = sample * 0.5;
-                             out[i*2] = (int16_t)sample; 
-                             out[i*2+1] = (int16_t)sample;
-                        }
-                        size_t w;
-                        i2s_write(SPK_I2S_NUM, stereo, read*2, &w, portMAX_DELAY);
-                        total+=read;
-                     }
-                 }
-            }
-            
-            if (millis() - lastData > 5000) break; // Timeout
-        }
-        
-        free(buff); 
-        free(stereo);
-        i2s_zero_dma_buffer(SPK_I2S_NUM);
-        isPlaying = false;
-        setLedColor(0,0,0);
-        Serial.println("[REMOTE] Playback complete");
+        Serial.println("[REMOTE] Playing queued audio...");
+        playStream(client);
     }
     client.stop();
 }
